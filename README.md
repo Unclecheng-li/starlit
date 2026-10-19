@@ -13,6 +13,8 @@
 ![OneBot](https://img.shields.io/badge/OneBot-11-4a90d9)
 ![Self--hosted](https://img.shields.io/badge/self--hosted-yes-8a7be0)
 
+<img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/e202aec3-c75f-4ba4-acb1-84136df58c11" />
+
 </div>
 
 ---
