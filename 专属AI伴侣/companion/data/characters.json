@@ -1,0 +1,67 @@
+{
+  "characters": [
+    {
+      "id": "3901000011",
+      "name": "古关忧",
+      "slug": "古关忧",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/23"
+    },
+    {
+      "id": "3901000012",
+      "name": "夏目安安",
+      "slug": "夏目安安",
+      "series": "魔法少女的魔女审判",
+      "source": "https://wiki.biligame.com/manosaba/%E5%A4%8F%E7%9B%AE%E5%AE%89%E5%AE%89"
+    },
+    {
+      "id": "3901000013",
+      "name": "天童凯伊",
+      "slug": "天童凯伊",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/518"
+    },
+    {
+      "id": "3901000014",
+      "name": "天童爱丽丝",
+      "slug": "天童爱丽丝",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/108"
+    },
+    {
+      "id": "3901000015",
+      "name": "早濑优香",
+      "slug": "早濑优香",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/52"
+    },
+    {
+      "id": "3901000016",
+      "name": "橘光",
+      "slug": "橘光",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/365"
+    },
+    {
+      "id": "3901000017",
+      "name": "橘希望",
+      "slug": "橘希望",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/366"
+    },
+    {
+      "id": "3901000018",
+      "name": "橘雪莉",
+      "slug": "橘雪莉",
+      "series": "魔法少女的魔女审判",
+      "source": "https://w.atwiki.jp/manosaba/pages/12.html"
+    },
+    {
+      "id": "3901000019",
+      "name": "空崎日奈",
+      "slug": "空崎日奈",
+      "series": "蔚蓝档案",
+      "source": "https://kivo.wiki/data/character/71"
+    }
+  ]
+}

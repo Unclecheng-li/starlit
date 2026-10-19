@@ -1,0 +1,1703 @@
+"""OneBot 11 服务端通道：Stapxs QQ Lite 等客户端直连 vol。
+
+## 为什么有这个
+
+NapCat 是 QQ 协议的第三方实现，账号有被腾讯风控的风险（学校用的
+号不能冒险）。这个通道把 vol 自己变成 OneBot 11 **服务端**：
+Stapxs QQ Lite（Web/Electron/Android）把 vol 当成「NapCat」连接，
+聊天全程不碰腾讯 —— 零封号风险，数据全在自己手里。
+
+## 身份模型（和 NapCat 链路的关键差异）
+
+NapCat 链路里 vol 冒充小号（self_id）和用户（owner）聊。
+这里角色反转：
+
+  - 登录者 = **用户自己**（get_login_info 返回 owner_id）
+    —— 客户端里「我」就是用户，就像真的在用 QQ
+  - 好友列表 = 只有「星野」一个人（self_id 扮演）
+  - 用户在客户端打字 → send_msg(user_id=星野) → vol 主管线
+    （IncomingMessage.user_id = owner_id，通过「是不是主人」校验）
+  - 星野回复 → 推送 OneBot message 事件（sender=星野）→ 客户端
+    左侧气泡；主动消息/表情包同一条路
+  - 用户消息受理 → 推送 message_sent 事件（sender=用户）→
+    发送端替换预发送占位（fake_msg），其他设备同步显示
+
+## 协议行为（对照 Stapxs 源码逐条确认过）
+
+  - 正向 WS：客户端连上来之后，API 调用（{action, params, echo}）
+    和事件推送**走同一条 WS**，响应原样带回 echo
+  - 鉴权：URL query ?access_token=...（或 Authorization 头）
+  - 心跳：必须定期推 meta_event heartbeat，否则客户端
+    「心跳包超时」强制断线（超时 = interval * 系数 或 interval+宽限）
+  - 握手链：get_version_info（app_name 含 "NapCat" 让它加载
+    NapCat pathMap）→ get_login_info → get_friends_with_category
+    + get_group_list
+  - 图片：客户端发图用 base64://（file 字段）；vol 发表情包用
+    HTTP URL（本服务自带静态文件路由 /assets/stickers/...）
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import inspect
+import itertools
+import json
+import random
+import re
+import shutil
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+from urllib.parse import quote
+
+from aiohttp import web, WSMsgType
+
+from ..config import QQConfig
+from .napcat import (
+    IncomingMessage, Handler, describe_segments, parse_message,
+)
+
+# 心跳事件里上报的 interval（毫秒）。实际推送周期取 heartbeat_sec（默认
+# 25s）—— 故意比上报值短，保证客户端的超时看门狗永远不会先到。
+_REPORTED_HEARTBEAT_MS = 30000
+
+# 静态文件（表情包下载）的 URL 前缀
+_ASSET_PREFIX = "assets/stickers"
+
+
+class OneBotServerChannel:
+    """vol 即 OneBot 11 服务端。"""
+
+    def __init__(
+        self,
+        cfg: QQConfig,
+        on_message: Handler,
+        *,
+        store=None,
+        sticker_dir: Optional[Path] = None,
+        dump_dir: Optional[Path] = None,
+        webapp_dir: Optional[Path] = None,
+        legacy_webapp_dir: Optional[Path] = None,
+        sticker_lib=None,
+        characters=None,
+        store_for=None,
+        settings_get=None,
+        settings_set=None,
+        character_creator=None,
+        traits_get=None,
+        traits_set=None,
+    ):
+        self.cfg = cfg                 # QQConfig（self_id=星野号 owner_id=用户号）
+        self.scfg = cfg.server         # QQServerConfig
+        self.on_message = on_message
+        self.store = store             # 主角色（星野）的存储
+        # 角色库 + 按角色取存储的回调（星野之外的角色各自一个 SQLite）
+        self.characters = characters
+        self.store_for = store_for
+        # 网页全局设置 / 添加角色（回调由 Companion 提供）
+        self.settings_get = settings_get
+        self.settings_set = settings_set
+        self.character_creator = character_creator
+        self.traits_get = traits_get
+        self.traits_set = traits_set
+        self.sticker_lib = sticker_lib  # 可选：让新上传/删除立刻对 vol 生效
+        self.sticker_dir = Path(sticker_dir).resolve() if sticker_dir else None
+        # 表情包缩略图缓存（列表用静态首帧，hover 才加载原图/动图）
+        self.thumb_dir = (self.sticker_dir.parent / "sticker_thumbs"
+                          if self.sticker_dir else None)
+        # 自定义聊天头像（用户在网页「聊天设置」里裁剪上传的）
+        self.avatar_dir = (self.sticker_dir.parent / "avatars"
+                           if self.sticker_dir else None)
+        # 每个角色（对话）允许使用的表情包分类
+        self.sets_path = (self.sticker_dir.parent / "sticker_sets.json"
+                          if self.sticker_dir else None)
+        self._sticker_sets: Dict[str, List[str]] = {}
+        # 用户自建的（可能是空的）分类
+        self.categories_path = (self.sticker_dir.parent / "sticker_categories.json"
+                                if self.sticker_dir else None)
+        self._categories: List[str] = []
+        self.dump_dir = dump_dir
+        # 自建聊天页面的托管目录（data/webclient）。vol 一个端口全包：
+        # 浏览器直接打开 http://<ip>:<port>/ 就是完整聊天界面，
+        # 不依赖 GitHub Pages、不需要另起静态服务。
+        self.webapp_dir = (Path(webapp_dir).resolve()
+                           if webapp_dir and Path(webapp_dir).is_dir() else None)
+        # 旧版 Stapxs 页面（data/webapp）：保留在 /stapxs/ 下备用，
+        # 功能更全但版式由第三方决定。
+        self.legacy_dir = (Path(legacy_webapp_dir).resolve()
+                           if legacy_webapp_dir and Path(legacy_webapp_dir).is_dir()
+                           else None)
+
+        self._clients: Set[web.WebSocketResponse] = set()
+        self._runner: Optional[web.AppRunner] = None
+        self._hb_task: Optional[asyncio.Task] = None
+        self._msg_ids = itertools.count(random.randint(1_000_000, 9_000_000))
+        # ★ 离线消息队列：客户端一个都不在线时，星野的消息（心跳主动/
+        # 接话/回复）不能就这么丢了 —— QQ 链路里腾讯服务器会暂存，
+        # 这里用本地队列顶上，客户端一连上就重放。
+        self._offline_queue: List[Dict[str, Any]] = []
+        # 有其他端在线时产生的事件也留一份：新设备连上来补发最近一段，
+        # 解决「手机在线时电脑错过消息」的多端同步问题。
+        self._recent_events: List[Dict[str, Any]] = []
+        # 实时消息 id → 会话/角色/文本，撤回时用来定位 transcript。
+        self._live_msgs: Dict[str, Dict[str, Any]] = {}
+        self._api_table = self._build_api_table()
+        # 兼容 main.py：channel.connected / ever_connected / _clients
+        self.connected = asyncio.Event()
+        self.ever_connected = False
+        self._last_media_log = 0.0
+
+    # ---------------- 生命周期 ----------------
+
+    async def start(self) -> None:
+        self._load_sticker_sets()
+        self._load_categories()
+        app = web.Application(client_max_size=32 * 1024 * 1024)
+        # 正向 WS：Stapxs 连接地址可配 /onebot/v11/ws 或 /ws；
+        # 根路径 GET 视情况：带 WebSocket Upgrade 头 → 也走 WS
+        #（兼容 ws://ip:port 这种填法），否则 → 托管的聊天页面。
+        app.router.add_get("/onebot/v11/ws", self._ws_handler)
+        app.router.add_get("/ws", self._ws_handler)
+        app.router.add_get("/", self._root)
+        # HTTP API（SSE 模式 / 调试用）：POST /<action>
+        app.router.add_post("/{action}", self._http_api)
+        # 表情包静态下载
+        app.router.add_get(f"/{_ASSET_PREFIX}/{{tail:.+}}", self._sticker_file)
+        app.router.add_get("/healthz", self._healthz)
+        # 表情包面板：分类清单 / 缩略图 / 上传 / 删除 / 每个角色的可用分类
+        app.router.add_get("/api/stickers", self._api_stickers)
+        app.router.add_get("/api/sticker-thumb", self._sticker_thumb)
+        app.router.add_get("/api/sticker-sets", self._api_sticker_sets)
+        app.router.add_post("/api/sticker-sets", self._api_sticker_sets_save)
+        app.router.add_post("/api/stickers/upload", self._api_sticker_upload)
+        app.router.add_post("/api/stickers/delete", self._api_sticker_delete)
+        app.router.add_post("/api/sticker-category/create", self._api_category_create)
+        app.router.add_post("/api/sticker-category/delete", self._api_category_delete)
+        # 自定义聊天头像：列表 / 读取 / 上传（客户端已裁成方形）/ 恢复默认
+        app.router.add_get("/api/avatars", self._api_avatars)
+        app.router.add_get("/api/avatar", self._api_avatar_file)
+        app.router.add_post("/api/avatar", self._api_avatar_save)
+        app.router.add_post("/api/avatar/delete", self._api_avatar_delete)
+        # 网页全局设置（API Key / Base URL / 模型）+ 新增角色
+        app.router.add_get("/api/settings", self._api_settings_get)
+        app.router.add_post("/api/settings", self._api_settings_post)
+        app.router.add_post("/api/characters/create", self._api_character_create)
+        # 每个角色的「热情 / 好感」
+        app.router.add_get("/api/character-traits", self._api_traits_get)
+        app.router.add_post("/api/character-traits", self._api_traits_post)
+        # 旧版 Stapxs 页面备用入口（必须先于根路径的静态兜底注册）
+        if self.legacy_dir:
+            app.router.add_get("/stapxs", self._legacy_root)
+            app.router.add_get("/stapxs/", self._legacy_root)
+            app.router.add_static("/stapxs/", self.legacy_dir,
+                                  name="legacy-webapp", show_index=False)
+        # 自建页面（css/js 等静态资源兜底；具体路由在上面已优先）
+        if self.webapp_dir:
+            app.router.add_static("/", self.webapp_dir,
+                                  name="webapp", show_index=False)
+
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self.scfg.listen, self.scfg.port)
+        try:
+            await site.start()
+        except OSError as e:
+            await self._runner.cleanup()
+            self._runner = None
+            raise RuntimeError(
+                f"onebot-server 端口 {self.scfg.port} 启动失败：{e}"
+                "（被占用的话先跑「一键停止.bat」，或改 qq.server.port）"
+            ) from e
+        self._hb_task = asyncio.create_task(self._heartbeat_loop())
+        base = self.scfg.base_url
+        auth = "已启用 access_token" if self.scfg.token else "未启用（仅限本机测试！）"
+        print(f"[onebot-server] 已监听 {self.scfg.listen}:{self.scfg.port}"
+              f"（鉴权：{auth}）")
+        print(f"[onebot-server] 客户端连接地址：ws://<本机IP>:{self.scfg.port}"
+              f"{'/?access_token=***' if self.scfg.token else ''}")
+        if self.webapp_dir:
+            print(f"[onebot-server] ★ 聊天页面已托管：浏览器打开 {base}/ 即聊"
+                  "（手机用 http://<电脑IP>:" + str(self.scfg.port) + "/）")
+        print(f"[onebot-server] 表情包下载地址前缀：{base}/{_ASSET_PREFIX}/")
+        print("[onebot-server] 聊天页面：自建页面在 /，Stapxs 备用在 /stapxs/")
+
+    async def stop(self) -> None:
+        if self._hb_task:
+            self._hb_task.cancel()
+            self._hb_task = None
+        for ws in list(self._clients):
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._clients.clear()
+        if self._runner:
+            await self._runner.cleanup()
+            self._runner = None
+
+    # ---------------- 根路径：页面 or WS ----------------
+
+    async def _root(self, request: web.Request) -> web.StreamResponse:
+        """GET / 的双重身份：
+
+        - WebSocket 握手（带 Upgrade 头）→ 当 WS 用（ws://ip:port 这种
+          连接地址不写路径也能连）
+        - 普通请求 → 自建聊天页面（webapp_dir 不存在时给一个简短的
+          指引页）
+        """
+        if "websocket" in (request.headers.get("Upgrade") or "").lower():
+            return await self._ws_handler(request)
+        if self.webapp_dir and (self.webapp_dir / "index.html").is_file():
+            return web.FileResponse(
+                self.webapp_dir / "index.html",
+                headers={"Cache-Control": "no-cache"})
+        return web.Response(text=(
+            "<h3>vol onebot-server</h3>"
+            "<p>聊天页面未部署（companion/data/webclient 不存在）。</p>"
+            "<p>WS 地址：ws://&lt;本机IP&gt;:" + str(self.scfg.port) + "/</p>"),
+            content_type="text/html")
+
+    async def _legacy_root(self, _request: web.Request) -> web.StreamResponse:
+        """Stapxs 备用页面的入口（静态目录 show_index=False，需显式给 index）。"""
+        if not self.legacy_dir:
+            return web.Response(status=404)
+        return web.FileResponse(
+            self.legacy_dir / "index.html",
+            headers={"Cache-Control": "no-cache"})
+
+    # ---------------- 鉴权 ----------------
+    def _auth_ok(self, request: web.Request) -> bool:
+        if not self.scfg.token:
+            return True
+        token = request.query.get("access_token") or ""
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            token = token or header[7:]
+        return token == self.scfg.token
+
+    # ---------------- WebSocket（事件推送 + API 调用） ----------------
+
+    async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=32 * 1024 * 1024)
+        await ws.prepare(request)
+        if not self._auth_ok(request):
+            print("[onebot-server] 拒绝连接：access_token 不匹配")
+            await ws.close(code=1008, message=b"bad access_token")
+            return ws
+        self._clients.add(ws)
+        self.connected.set()
+        self.ever_connected = True
+        print(f"[onebot-server] 客户端已连接（当前 {len(self._clients)} 个）")
+        # 重放离线期间攒下的消息（没有任何端在线时）。
+        queued: List[Dict[str, Any]] = []
+        if self._offline_queue:
+            queued, self._offline_queue = self._offline_queue, []
+            print(f"[onebot-server] 重放 {len(queued)} 条离线消息")
+        # 再补发「其他端在线时」最近产生的事件，让新设备追上刚才的对话。
+        # 客户端会按 message_id / 内容去重，重复补发不会多出气泡。
+        recent = [e for e in self._recent_events
+                  if float(e.get("time") or 0) >= time.time() - 1800]
+        if recent:
+            print(f"[onebot-server] 补发最近 {len(recent)} 条同步事件")
+        for ev in sorted(queued + recent,
+                         key=lambda e: float(e.get("time") or 0)):
+            try:
+                payload = dict(ev)
+                payload["_replay"] = True
+                await ws.send_json(payload)
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            async for msg in ws:
+                if msg.type != WSMsgType.TEXT:
+                    continue
+                try:
+                    data = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                action = str(data.get("action") or "")
+                params = data.get("params") or {}
+                result = await self._dispatch(action, params)
+                if result is not None and data.get("echo") is not None:
+                    result["echo"] = data.get("echo")
+                    try:
+                        await ws.send_json(result)
+                    except ConnectionResetError:
+                        break
+        finally:
+            self._clients.discard(ws)
+            print(f"[onebot-server] 客户端断开（剩 {len(self._clients)} 个）")
+        # ★ 必须返回 ws（与 napcat.py 同坑：aiohttp 要求）
+        return ws
+
+    async def _http_api(self, request: web.Request) -> web.Response:
+        """POST /<action>：和 WS 同一套 dispatch（SSE 模式 / 调试用）。"""
+        if not self._auth_ok(request):
+            return web.json_response({"status": "failed", "retcode": 1403,
+                                      "wording": "bad access_token"}, status=403)
+        action = request.match_info["action"]
+        try:
+            params = await request.json()
+        except Exception:  # noqa: BLE001
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        result = await self._dispatch(action, params)
+        # CORS：Stapxs Web 版（https 页面）用 SSE 模式时会跨域 fetch
+        return web.json_response(result, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        })
+
+    # ---------------- 事件广播 ----------------
+
+    async def _broadcast(self, event: Dict[str, Any]) -> None:
+        if not self._clients:
+            return
+        dead: List[web.WebSocketResponse] = []
+        for ws in list(self._clients):
+            try:
+                # 客户端卡死/不读时，send_json 可能一直挂着；
+                # 发送锁是全局的，一条挂住会让所有角色都发不出话。
+                await asyncio.wait_for(ws.send_json(event), timeout=3.0)
+            except Exception:  # noqa: BLE001
+                dead.append(ws)
+        for ws in dead:
+            self._clients.discard(ws)
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _heartbeat_loop(self) -> None:
+        interval = max(5, int(self.scfg.heartbeat_sec))
+        while True:
+            await asyncio.sleep(interval)
+            if not self._clients:
+                continue
+            await self._broadcast({
+                "time": int(time.time()),
+                "self_id": int(self.cfg.owner_id or 0),
+                "post_type": "meta_event",
+                "meta_event_type": "heartbeat",
+                "status": "ok",
+                "interval": _REPORTED_HEARTBEAT_MS,
+            })
+
+    # ---------------- API 分发 ----------------
+
+    def _build_api_table(self) -> Dict[str, Any]:
+        """action → 处理函数。在 __init__ 构造一次（绑定的方法引用），
+        放在 _dispatch 里现构造的话，写错方法名会在每次调用时炸。"""
+        return {
+            "get_version_info": self.api_get_version_info,
+            "get_status": self.api_get_status,
+            "get_login_info": self.api_get_login_info,
+            "get_friend_list": self.api_get_friend_list,
+            "get_friends_with_category": self.api_get_friends_with_category,
+            "get_friend_list_ex": self.api_get_friends_with_category,
+            "get_group_list": self.api_get_group_list,
+            "get_stranger_info": self.api_get_stranger_info,
+            "send_msg": self.api_send_msg,
+            "send_private_msg": self.api_send_msg,
+            "send_group_msg": self.api_send_group_msg,
+            "get_friend_msg_history": self.api_get_friend_msg_history,
+            "get_group_msg_history": self.api_get_group_msg_history,
+            "get_msg": self.api_get_msg,
+            "get_msg_history": self.api_get_friend_msg_history,
+            "get_forward_msg": self.api_get_forward_msg,
+            "mark_private_msg_as_read": self.api_set_msg_read,
+            "mark_group_msg_as_read": self.api_set_msg_read,
+            "set_msg_read": self.api_set_msg_read,
+            "set_msg_emoji_like": self.api_noop,
+            "send_like": self.api_noop,
+            "delete_msg": self.api_delete_msg,
+            "fetch_custom_face": self.api_fetch_custom_face,
+            "get_recent_contact": self.api_get_recent_contact,
+            "get_record": self.api_null,
+            "get_image": self.api_null,
+            "get_cookies": self.api_empty_str,
+            "get_csrf_token": self.api_empty_str,
+            "can_send_image": self.api_can_send,
+            "can_send_record": self.api_can_send,
+            "get_online_clients": self.api_null,
+            "getEssenceMsgList": self.api_null,
+            "_get_group_notice": self.api_null,
+            "get_group_root_files": self.api_null,
+        }
+
+    async def _dispatch(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        handler = self._api_table.get(action)
+        if handler is None:
+            # 未知 action：回 ok + null（不回 failed，避免客户端弹错误弹窗），
+            # 但打一条日志 —— 后续按实际被调用的频率决定要不要真实现。
+            print(f"[onebot-server] 未实现的 action：{action}"
+                  f"（params: {str(params)[:80]}）→ 返回 ok/null")
+            return self._ok(None)
+        try:
+            data = await handler(params)
+            return self._ok(data)
+        except Exception as e:  # noqa: BLE001
+            print(f"[onebot-server] action {action} 出错：{e!r}")
+            return {"status": "failed", "retcode": 1200,
+                    "wording": str(e)[:200], "data": None}
+
+    @staticmethod
+    def _ok(data: Any) -> Dict[str, Any]:
+        return {"status": "ok", "retcode": 0, "data": data}
+
+    # ---------------- 元信息类 API ----------------
+
+    async def api_get_version_info(self, _p: Dict[str, Any]) -> Dict[str, Any]:
+        # app_name 含 "NapCat" → Stapxs 会加载 NapCat.Onebot.yaml pathMap
+        return {
+            "app_name": "NapCat",
+            "app_version": "vol/onebot-server 1.0",
+            "protocol_version": "v11",
+            "impl": "vol",
+        }
+
+    async def api_get_status(self, _p: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "online": bool(self._clients),
+            "good": True,
+            "app_initialized": True,
+            "statistics": {"packet_received": 0, "message_sent": 0},
+        }
+
+    async def api_get_login_info(self, _p: Dict[str, Any]) -> Dict[str, Any]:
+        """登录者 = 用户自己。客户端里的「我」就是用户。"""
+        return {"user_id": int(self.cfg.owner_id or 0),
+                "nickname": self.scfg.owner_nickname}
+
+    async def api_get_friend_list(self, _p: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if self.characters:
+            return [self.characters.buddy(c) for c in self.characters.all()]
+        return [self._bot_buddy()]
+
+    async def api_get_friends_with_category(
+            self, _p: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """NapCat 分类格式：data[*].buddyList[*]（Stapxs pathMap source）。"""
+        if self.characters:
+            buddies = [self.characters.buddy(c) for c in self.characters.all()]
+        else:
+            buddies = [self._bot_buddy()]
+        return [{
+            "categoryId": 1,
+            "categoryName": "角色",
+            "categorySortId": 1,
+            "buddyList": buddies,
+        }]
+
+    def _bot_buddy(self) -> Dict[str, Any]:
+        return {
+            "user_id": int(self.cfg.self_id or 0),
+            "nickname": self.scfg.bot_nickname,
+            "remark": "",
+            "longNick": "",
+            "q_id": "",
+            "sex": "unknown",
+        }
+
+    async def api_get_group_list(self, _p: Dict[str, Any]) -> List[Any]:
+        return []
+
+    async def api_get_stranger_info(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        cid = str(p.get("user_id") or "")
+        c = self.characters.get(cid) if self.characters else None
+        if c:
+            return {
+                "user_id": int(c.id), "nickname": c.name, "sex": "unknown",
+                "age": 17, "qid": "", "longNick": "", "city": "基沃托斯",
+            }
+        return {
+            "user_id": int(self.cfg.self_id or 0),
+            "nickname": self.scfg.bot_nickname,
+            "sex": "unknown",
+            "age": 17,
+            "qid": "",
+            "longNick": "随便随便~ 要轻松最重要啦~",
+            "city": "阿拜多斯",
+        }
+
+    # ---------------- 发消息（用户 → vol） ----------------
+
+    async def api_send_msg(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """用户在客户端发消息。user_id 参数 = 星野（会话目标）。
+
+        构造 IncomingMessage（user_id=owner，通过主管线的「是不是主人」
+        校验）→ fire 进主管线（不阻塞响应）→ 立即推 message_sent
+        事件（发送端替换 fake_msg，其他端同步）。
+        """
+        message = params.get("message")
+        target_id = str(params.get("user_id") or "")
+        group_id = str(params.get("group_id") or "")
+        if group_id:
+            # vol 当前不支持群聊会话（Stapxs 群列表也是空的）；
+            # 真出现说明客户端行为超预期，记下来但不进主管线。
+            print(f"[onebot-server] 收到群消息（group_id={group_id}），"
+                  "vol 不支持群会话，忽略")
+            return {"message_id": str(next(self._msg_ids))}
+
+        # 消息段归一：Stapxs 偶尔发 subType（驼峰）—— 统一成 sub_type，
+        # 这样主管线的 _is_sticker_only 判定（认 sub_type=="1"）才能命中
+        segments = self._normalize_segments(message)
+        raw = {"message_type": "private",
+               "time": int(time.time()),
+               "user_id": int(self.cfg.owner_id or 0) if self.cfg.owner_id else 0,
+               "message": segments,
+               "_target_id": target_id}
+
+        text, images, mentioned, img_ids, img_sizes, fwd_ids = parse_message(
+            segments, self.cfg.owner_id)
+        # base64:// 不是 NapCat 的 file_id —— 别让它触发 get_image 旁路
+        img_ids = [i for i in img_ids if not str(i).startswith("base64://")]
+
+        if images:
+            now = time.time()
+            if now - self._last_media_log > 30:
+                self._last_media_log = now
+                print(f"[onebot-server] 收到带图消息：{describe_segments(segments)}")
+
+        mid = str(next(self._msg_ids))
+        peer_id = target_id or str(self.cfg.self_id or "")
+        msg = IncomingMessage(
+            kind="private",
+            user_id=str(self.cfg.owner_id or ""),   # 发送者 = 用户
+            peer_id=peer_id,                        # 会话对象 = 星野或新增角色
+            group_id="",
+            message_id=mid,
+            nickname=self.scfg.owner_nickname,
+            text=text,
+            images=images,
+            raw_image_ids=img_ids,
+            raw_image_sizes=img_sizes,
+            forward_ids=fwd_ids,
+            mentions_self=mentioned,
+            raw=raw,
+        )
+        # 先广播 message_sent（客户端把预发送占位替换成真消息），
+        # 再进主管线。★ 用 create_task 延迟推送：保证 send_msg 的 echo
+        # 响应先回到客户端、事件紧随其后 —— 和 NapCat 的「HTTP 响应 +
+        # 事件通道」时序一致，客户端的等待逻辑不会被事件抢跑打乱。
+        asyncio.create_task(self._push_user_message(mid, segments, text, peer_id))
+        asyncio.create_task(self._safe_handle(msg))
+        return {"message_id": mid}
+
+    async def api_send_group_msg(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.api_send_msg(params)
+
+    async def _safe_handle(self, msg: IncomingMessage) -> None:
+        try:
+            await self.on_message(msg)
+        except Exception as e:  # noqa: BLE001
+            print(f"[onebot-server] 主管线处理出错：{e!r}")
+
+    @staticmethod
+    def _normalize_segments(message: Any) -> Any:
+        """把各种形态的 message 字段归一成 OneBot 段数组。
+
+        兼容三种输入：str（纯文本/CQ 码）、[{type,data}]（标准）、
+        以及 Stapxs 偶发的扁平段（{type:'text', text:'...'}）和
+        驼峰键（subType → sub_type）。
+        """
+        if message is None:
+            return []
+        if isinstance(message, str):
+            return [{"type": "text", "data": {"text": message}}]
+        if not isinstance(message, list):
+            return []
+        out: List[Any] = []
+        for seg in message:
+            if not isinstance(seg, dict):
+                continue
+            t = seg.get("type")
+            if not t:
+                continue
+            if "data" in seg and isinstance(seg["data"], dict):
+                data = dict(seg["data"])
+            else:
+                data = {k: v for k, v in seg.items() if k != "type"}
+            # 驼峰归一
+            for camel, snake in (("subType", "sub_type"),):
+                if camel in data:
+                    data.setdefault(snake, data.pop(camel))
+            out.append({"type": t, "data": data})
+        return out
+
+    async def _emit_event(self, event: Dict[str, Any]) -> None:
+        """统一出口：没有客户端时进离线队列；有客户端时广播并留一份给新设备。"""
+        if not self._clients:
+            self._offline_queue.append(event)
+            del self._offline_queue[:-50]        # 只留最近 50 条
+            return
+        self._recent_events.append(event)
+        cutoff = time.time() - 1800           # 只补最近 30 分钟
+        self._recent_events = [e for e in self._recent_events
+                               if float(e.get("time") or 0) >= cutoff]
+        del self._recent_events[:-200]
+        await self._broadcast(event)
+
+    async def _push_user_message(self, mid: str, segments: Any, text: str,
+                                 peer_id: str = "") -> None:
+        """用户消息上屏：message_sent 事件（sender=用户，user_id=会话对象）。
+
+        Stapxs 收到后：发送端用它替换 fake_msg 占位；其他设备作为
+        「自己发的消息」追加（右侧气泡）—— 这就是多端同步。
+        """
+        try:
+            peer_int = int(peer_id or self.cfg.self_id or 0)
+        except ValueError:
+            peer_int = 0
+        event = {
+            "time": int(time.time()),
+            "self_id": int(self.cfg.owner_id or 0),
+            "post_type": "message_sent",
+            "message_type": "private",
+            "sub_type": "friend",
+            "message_id": mid,
+            "user_id": peer_int,                     # 会话对方 = 当前角色
+            "sender": {"user_id": int(self.cfg.owner_id or 0),
+                       "nickname": self.scfg.owner_nickname},
+            "message": segments if isinstance(segments, list) else [],
+            "raw_message": text,
+        }
+        self._live_msgs[mid] = {
+            "role": "user", "peer_id": str(peer_int),
+            "ts": float(event["time"]), "text": text,
+        }
+        self._trim_live_msgs()
+        await self._emit_event(event)
+
+    # ---------------- vol → 客户端（Sender 调用的接口） ----------------
+
+    async def send_text(self, text: str, *, user_id: str = "",
+                        group_id: str = "", sender_id: str = "",
+                        sender_name: str = "") -> Dict[str, Any]:
+        await self._push_bot_message(
+            [{"type": "text", "data": {"text": text}}], text,
+            sender_id=sender_id, sender_name=sender_name)
+        return {"status": "ok", "retcode": 0, "data": None}
+
+    async def send_sticker(self, file: str, *, user_id: str = "",
+                           group_id: str = "",
+                           summary: str = "[表情包]",
+                           sender_id: str = "",
+                           sender_name: str = "") -> Dict[str, Any]:
+        """file 是 file_uri() 生成的 HTTP URL（客户端 <img> 直接加载）。"""
+        await self._push_bot_message(
+            [{"type": "image",
+              "data": {"file": file, "summary": summary, "sub_type": 1}}],
+            summary, sender_id=sender_id, sender_name=sender_name)
+        return {"status": "ok", "retcode": 0, "data": None}
+
+    async def send_segments(self, segments: List[Dict[str, Any]], *,
+                            user_id: str = "", group_id: str = "",
+                            sender_id: str = "",
+                            sender_name: str = "") -> Dict[str, Any]:
+        raw = "".join(str((s.get("data") or {}).get("text") or "")
+                      for s in segments if s.get("type") == "text")
+        await self._push_bot_message(
+            segments, raw, sender_id=sender_id, sender_name=sender_name)
+        return {"status": "ok", "retcode": 0, "data": None}
+
+    async def _push_bot_message(self, segments: List[Dict[str, Any]],
+                                raw_text: str, *, sender_id: str = "",
+                                sender_name: str = "") -> None:
+        """角色的消息：message 事件（sender=该角色）→ 客户端左侧气泡。
+
+        没有客户端在线时入离线队列（连接建立时重放），
+        有客户端在线时直接广播。"""
+        try:
+            sid = int(sender_id or self.cfg.self_id or 0)
+        except ValueError:
+            sid = 0
+        name = (sender_name or self.scfg.bot_nickname).strip() or "星野"
+        mid = str(next(self._msg_ids))
+        event = {
+            "time": int(time.time()),
+            "self_id": int(self.cfg.owner_id or 0),
+            "post_type": "message",
+            "message_type": "private",
+            "sub_type": "friend",
+            "message_id": mid,
+            "user_id": sid,                         # 发送者 = 当前角色
+            "sender": {"user_id": sid, "nickname": name},
+            "message": segments,
+            "raw_message": raw_text,
+        }
+        self._live_msgs[mid] = {
+            "role": "assistant", "peer_id": str(sid),
+            "ts": float(event["time"]), "text": raw_text,
+        }
+        self._trim_live_msgs()
+        if not self._clients:
+            self._offline_queue.append(event)
+            del self._offline_queue[:-50]        # 只留最近 50 条
+            print(f"[onebot-server] 无客户端在线，消息入离线队列"
+                  f"（{len(self._offline_queue)} 条待重放）：{raw_text[:30]}")
+            return
+        await self._emit_event(event)
+
+    def _trim_live_msgs(self) -> None:
+        """实时消息 id 表只留最近一小时，避免无限增长。"""
+        if len(self._live_msgs) <= 600:
+            return
+        cutoff = time.time() - 3600
+        for mid, info in list(self._live_msgs.items()):
+            if float(info.get("ts") or 0) < cutoff:
+                self._live_msgs.pop(mid, None)
+
+    def file_uri(self, path: str | Path) -> str:
+        """本地文件 → 客户端可加载的 HTTP URL（表情包下载走静态路由）。
+
+        与 NapCatChannel.file_uri（file:///）同签名 —— Sender 不用改。
+        不在图库目录下的文件返回 file:// 原样（客户端加载不了，
+        但日志里能看出来）。
+        """
+        p = Path(path).resolve()
+        if self.sticker_dir:
+            try:
+                rel = p.relative_to(self.sticker_dir)
+                return f"{self.scfg.base_url}/{_ASSET_PREFIX}/{rel.as_posix()}"
+            except ValueError:
+                pass
+        return p.as_uri()
+
+    async def fetch_forward(self, fid: str, max_msgs: int = 60) -> str:
+        """合并转发正文。自托管链路里没有 QQ 的转发结构，返回空。"""
+        return ""
+
+    # ---------------- 撤回 ----------------
+
+    @staticmethod
+    def _remove_turn_segment(store, turn: Dict[str, Any], *,
+                             index: Optional[int] = None,
+                             text: str = "") -> None:
+        """从一条 transcript 里删掉一个气泡；删空就整条删除。"""
+        raw = str(turn.get("text") or "")
+        lines = raw.split("\n")
+        if index is not None:
+            if 0 <= index < len(lines):
+                lines.pop(index)
+        elif text:
+            needle = text.strip()
+            found = False
+            for i, line in enumerate(lines):
+                if line.strip() == needle:
+                    lines.pop(i)
+                    found = True
+                    break
+            if not found and needle:
+                joined = "\n".join(lines)
+                if needle in joined:
+                    lines = joined.replace(needle, "", 1).split("\n")
+        new = "\n".join(line for line in lines if line.strip())
+        tid = int(turn.get("id") or 0)
+        if not tid:
+            return
+        if new.strip():
+            store.update_turn_text(tid, new[:800])
+        else:
+            store.delete_turn(tid)
+
+    async def api_delete_msg(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """撤回消息：删掉 transcript 里的对应内容，并通知所有端移除气泡。"""
+        mid = str(params.get("message_id") or params.get("msg_id") or "").strip()
+        if not mid:
+            raise ValueError("缺少 message_id")
+        peer_id = str(params.get("peer_id") or params.get("target_id") or "").strip()
+        info = self._live_msgs.get(mid)
+        role = ""
+        text = str(params.get("text") or "")
+        ts = float(params.get("ts") or 0)
+        if info:
+            peer_id = peer_id or str(info.get("peer_id") or "")
+            role = str(info.get("role") or "")
+            text = str(info.get("text") or "")
+            ts = float(info.get("ts") or 0)
+        if not peer_id:
+            raise ValueError("缺少 peer_id")
+
+        store = self.store_for(peer_id) if self.store_for else self.store
+        turn_id: Optional[int] = None
+        index: Optional[int] = None
+        whole_turn = False
+        if mid.startswith("h"):
+            body = mid[1:]
+            try:
+                if "-" in body:
+                    a, b = body.split("-", 1)
+                    turn_id = int(a)
+                    index = max(0, int(b) - 1)
+                else:
+                    turn_id = int(body)
+                    whole_turn = True
+            except ValueError:
+                turn_id = None
+        if store and turn_id is not None:
+            if whole_turn:
+                store.delete_turn(turn_id)
+            else:
+                turn = store.get_turn(turn_id)
+                if turn:
+                    self._remove_turn_segment(store, turn, index=index, text=text)
+                    role = str(turn.get("role") or role)
+        elif store and role:
+            turn = store.find_turn(role, text, ts)
+            if turn:
+                self._remove_turn_segment(store, turn, text=text)
+
+        try:
+            peer_int = int(peer_id or 0)
+        except ValueError:
+            peer_int = 0
+        notice = {
+            "time": int(time.time()),
+            "self_id": int(self.cfg.owner_id or 0),
+            "post_type": "notice",
+            "notice_type": "friend_recall",
+            "user_id": peer_int,
+            "target_id": peer_int,
+            "operator_id": int(self.cfg.owner_id or 0),
+            "message_id": mid,
+            "recalled_role": role or "unknown",
+        }
+        await self._emit_event(notice)
+        self._live_msgs.pop(mid, None)
+        print(f"[onebot-server] 撤回消息 {mid}（{peer_id} / {role or '未知'}）")
+        return {"message_id": mid}
+
+    async def api_set_msg_read(self, params: Dict[str, Any]) -> None:
+        """同步「已读到哪」：多端打开会话后，其他设备的红点一起清掉。"""
+        peer = str(params.get("user_id") or params.get("peer_id") or "").strip()
+        if not peer or not self.store:
+            return None
+        try:
+            ts = float(params.get("time") or time.time())
+        except (TypeError, ValueError):
+            ts = time.time()
+        ts = min(ts, time.time())
+        self.store.kv_set(f"last_read:{peer}", ts)
+        await self._emit_event({
+            "time": int(time.time()),
+            "self_id": int(self.cfg.owner_id or 0),
+            "post_type": "notice",
+            "notice_type": "read_state",
+            "user_id": int(peer) if peer.isdigit() else 0,
+            "target_id": int(peer) if peer.isdigit() else 0,
+            "read_time": int(ts),
+        })
+        return None
+
+    # ---------------- 历史消息 ----------------
+
+    async def api_get_friend_msg_history(
+            self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """transcript 回放。Stapxs 打开会话 / 上滑加载时调。
+
+        NapCat 返回格式：data.messages[]，字段 message_id / real_seq /
+        time / sender / message（段数组）/ raw_message，按时间正序。
+        注意 transcript 只存了纯文本（图片以「[表情包]」等占位）——
+        历史里的图片暂时还原不出来，文字部分完整。
+        """
+        try:
+            count = int(params.get("count") or 20)
+        except (TypeError, ValueError):
+            count = 20
+        count = max(1, min(count, 100))
+        peer_id = str(params.get("user_id") or self.cfg.self_id or "")
+        store = self.store_for(peer_id) if self.store_for else self.store
+        if not store:
+            return {"messages": []}
+        char = self.characters.get(peer_id) if self.characters else None
+        peer_int = int(char.id) if char else int(self.cfg.self_id or 0)
+        peer_name = char.name if char else self.scfg.bot_nickname
+        turns = store.recent_turns(max(count, 20) * 2)
+        # 只回放私聊（当前也只有私聊），倒着数 count 条再正序
+        picked = turns[-count:] if len(turns) > count else turns
+        messages = []
+        seq = itertools.count(1)
+        for t in picked:
+            role = t.get("role") or "user"
+            is_user = role == "user"
+            text = str(t.get("text") or "")
+            # ★ assistant 的一轮回复在 transcript 里是「多条气泡用 \n 拼起来」
+            #   的。历史里必须拆回多条，否则网页端会先看到分开发的气泡，
+            #   重连后又多出一条合并版（实测事故）。
+            parts = [text] if is_user else [p for p in text.split("\n") if p.strip()]
+            if not parts:
+                parts = [text]
+            base_ts = int(float(t.get("ts") or time.time()))
+            n = len(parts)
+            tid = int(t.get("id") or 0)
+            for idx, part in enumerate(parts):
+                # ★ 稳定 message_id：同一 turn 无论重连几次都返回同一个 id。
+                # 多端同步靠它去重；撤回也能直接定位到 transcript.id。
+                if tid:
+                    mid = f"h{tid}" if n == 1 else f"h{tid}-{idx + 1}"
+                else:
+                    mid = str(next(self._msg_ids))
+                messages.append({
+                    "message_id": mid,
+                    "real_seq": next(seq),
+                    "target_id": peer_int,
+                    "message_type": "private",
+                    "post_type": "message",
+                    # 每个气泡相差 1 秒，最后一个对齐 turn 时间；这样排序稳定
+                    "time": base_ts - (n - 1 - idx),
+                    "sender": {
+                        "user_id": int(self.cfg.owner_id if is_user else peer_int),
+                        "nickname": (self.scfg.owner_nickname if is_user
+                                     else peer_name),
+                    },
+                    "message": [{"type": "text",
+                                 "data": {"text": part}}],
+                    "raw_message": part,
+                })
+        return {"messages": messages, "result": None, "echo": None}
+
+    async def api_get_group_msg_history(self, _p: Dict[str, Any]) -> Dict[str, Any]:
+        """群历史。本模式没有群，恒空（Stapxs 群列表也是空的）。"""
+        return {"messages": []}
+
+    # ---------------- 杂项 API ----------------
+
+    async def api_get_msg(self, _p: Dict[str, Any]) -> Any:
+        return None
+
+    async def api_get_forward_msg(self, _p: Dict[str, Any]) -> Any:
+        return {"messages": []}
+
+    async def api_noop(self, _p: Dict[str, Any]) -> Any:
+        return None
+
+    async def api_null(self, _p: Dict[str, Any]) -> Any:
+        return None
+
+    async def api_empty_str(self, _p: Dict[str, Any]) -> str:
+        return ""
+
+    async def api_can_send(self, _p: Dict[str, Any]) -> Dict[str, Any]:
+        return {"yes": True}
+
+    async def api_get_recent_contact(self, _p: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """最近会话列表：每个角色一条，按最后一条消息时间倒序。"""
+        out: List[Dict[str, Any]] = []
+        chars = self.characters.all() if self.characters else []
+        for c in chars:
+            store = self.store_for(c.id) if self.store_for else self.store
+            last_ts = 0.0
+            last_msg = ""
+            if store:
+                turns = store.recent_turns(1)
+                if turns:
+                    last_ts = float(turns[0].get("ts") or 0)
+                    text = str(turns[0].get("text") or "").split("\n")[0]
+                    if text:
+                        prefix = "我：" if turns[0].get("role") == "user" else ""
+                        last_msg = prefix + text[:40]
+            out.append({
+                "peerUin": int(c.id),
+                "peerName": c.name,
+                "msgTime": int(last_ts) if last_ts else 0,
+                "lastMsg": last_msg,
+                "readTime": int(self.store.kv_get(f"last_read:{c.id}", 0))
+                if self.store else 0,
+                "chatType": 1,
+                "senderUin": int(self.cfg.owner_id or 0),
+            })
+        out.sort(key=lambda x: x["msgTime"], reverse=True)
+        return out
+
+    async def api_fetch_custom_face(self, _p: Dict[str, Any]) -> List[str]:
+        """收藏表情面板：把 vol 的表情包库喂给它。
+
+        返回 HTTP URL 列表 —— 用户在客户端里就能直接翻星野的图库。
+        """
+        urls: List[str] = []
+        if self.sticker_dir and self.sticker_dir.is_dir():
+            exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+            files = [p for p in self.sticker_dir.rglob("*")
+                     if p.suffix.lower() in exts and p.is_file()]
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for p in files[:60]:
+                urls.append(self.file_uri(p))
+        return urls
+
+    # ---------------- 静态文件 / 健康检查 ----------------
+
+    async def _api_stickers(self, _request: web.Request) -> web.Response:
+        """自建页面的表情包面板：按图库一级目录分组。
+
+        url     原始文件（动图在 hover 时才加载）
+        thumb   服务端生成的首帧缩略图（静态、体积小）
+        animated 是否是可能带帧的格式（gif/webp）
+
+        相对路径（/assets/stickers/...）是刻意的 —— 手机用局域网 IP
+        打开页面时，绝对 URL 里的 127.0.0.1/base_url 会指向手机自己。
+        """
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        if self.sticker_dir and self.sticker_dir.is_dir():
+            exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+            for p in sorted(self.sticker_dir.rglob("*")):
+                if p.suffix.lower() not in exts or not p.is_file():
+                    continue
+                rel = p.relative_to(self.sticker_dir)
+                key = rel.parts[0] if len(rel.parts) > 1 else "其他"
+                url = f"/{_ASSET_PREFIX}/{rel.as_posix()}"
+                groups.setdefault(key, []).append({
+                    "url": url,
+                    "thumb": self._thumb_url(rel),
+                    "animated": p.suffix.lower() in (".gif", ".webp"),
+                    "path": rel.as_posix(),
+                    "group": key,
+                })
+        # 用户新建的空分类也要出现（否则建完看不见）
+        for cat in self._categories:
+            groups.setdefault(cat, [])
+        # 自建分类排最前，「其他」（根目录散图）排最后
+        ordered = sorted(
+            groups.items(),
+            key=lambda kv: (kv[0] != "custom", kv[0] == "其他", kv[0].lower()))
+        display = {"custom": "我的表情"}
+        return web.json_response({
+            "groups": [
+                {"key": k, "name": display.get(k, k), "items": v}
+                for k, v in ordered
+            ],
+            "total": sum(len(v) for v in groups.values()),
+        })
+
+    # ---- 对话级表情包分类 / 自建表情维护 ----
+
+    @staticmethod
+    def _sanitize_group(name: Any) -> str:
+        """分类名 → 安全的顶层文件夹名（允许中文和空格，不含路径分隔符）。"""
+        s = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", str(name or "")).strip()
+        s = s.strip(".")
+        return s[:24] or "custom"
+
+    def _load_categories(self) -> None:
+        if not self.categories_path or not self.categories_path.exists():
+            return
+        try:
+            data = json.loads(self.categories_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                self._categories = [str(x) for x in data
+                                    if isinstance(x, str) and x and x != "其他"]
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[onebot-server] 读取表情分类失败：{e!r}")
+
+    def _save_categories(self) -> None:
+        if not self.categories_path:
+            return
+        try:
+            self.categories_path.parent.mkdir(parents=True, exist_ok=True)
+            self.categories_path.write_text(
+                json.dumps(self._categories, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        except OSError as e:
+            print(f"[onebot-server] 保存表情分类失败：{e!r}")
+
+    async def _api_category_create(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.sticker_dir:
+            return web.json_response({"ok": False, "error": "no sticker dir"},
+                                     status=500)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        key = self._sanitize_group(body.get("name"))
+        if key == "其他":
+            return web.json_response({"ok": False, "error": "分类名不可用"},
+                                     status=400)
+        target = self.sticker_dir / key
+        if target.exists() or key in self._categories:
+            return web.json_response({"ok": False, "error": "分类已存在"}, status=409)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        self._categories.append(key)
+        self._save_categories()
+        print(f"[onebot-server] 新建表情分类：{key}")
+        return web.json_response({"ok": True, "key": key, "name": key})
+
+    async def _api_category_delete(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.sticker_dir:
+            return web.json_response({"ok": False, "error": "no sticker dir"},
+                                     status=500)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        key = str(body.get("key") or "").strip()
+        if not key or key == "其他" or "/" in key or "\\" in key:
+            return web.json_response({"ok": False, "error": "bad category"},
+                                     status=400)
+        try:
+            target = (self.sticker_dir / key).resolve()
+            if target.parent != self.sticker_dir:
+                raise ValueError("not a top-level category")
+        except (ValueError, OSError):
+            return web.json_response({"ok": False, "error": "bad category"},
+                                     status=403)
+        if not target.is_dir():
+            return web.json_response({"ok": False, "error": "分类不存在"},
+                                     status=404)
+        exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+        files = [p for p in target.rglob("*")
+                 if p.is_file() and p.suffix.lower() in exts]
+        try:
+            shutil.rmtree(target)
+        except OSError as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        if files:
+            if self.sticker_lib is not None:
+                self.sticker_lib.remove_items(files)
+            else:
+                path = self._index_path()
+                if path and path.exists():
+                    try:
+                        data = json.loads(path.read_text(encoding="utf-8"))
+                        wants = {str(p.resolve()) for p in files}
+                        data = [d for d in data
+                                if str(Path(str(d.get("file", ""))).resolve()) not in wants]
+                        path.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                                        encoding="utf-8")
+                    except (OSError, json.JSONDecodeError) as e:  # noqa: BLE001
+                        print(f"[onebot-server] 更新表情索引失败：{e!r}")
+        if key in self._categories:
+            self._categories.remove(key)
+            self._save_categories()
+        # 把分类从所有对话的可用列表里移除
+        changed = False
+        for peer, groups in self._sticker_sets.items():
+            if key in groups:
+                groups.remove(key)
+                changed = True
+        if changed:
+            self._save_sticker_sets()
+            self._apply_sticker_sources()
+        print(f"[onebot-server] 删除表情分类：{key}（{len(files)} 张）")
+        return web.json_response({"ok": True, "deleted": len(files)})
+
+    def _load_sticker_sets(self) -> None:
+        if not self.sets_path or not self.sets_path.exists():
+            return
+        try:
+            data = json.loads(self.sets_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self._sticker_sets = {
+                    str(k): [str(x) for x in v]
+                    for k, v in data.items() if isinstance(v, list)
+                }
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[onebot-server] 读取表情包分类设置失败：{e!r}")
+        self._apply_sticker_sources()
+
+    def _apply_sticker_sources(self) -> None:
+        if not self.sticker_lib:
+            return
+        key = str(self.cfg.self_id or "")
+        if key in self._sticker_sets:
+            self.sticker_lib.set_allowed_sources(self._sticker_sets[key])
+        else:
+            self.sticker_lib.set_allowed_sources(None)
+
+    def _save_sticker_sets(self) -> None:
+        if not self.sets_path:
+            return
+        try:
+            self.sets_path.parent.mkdir(parents=True, exist_ok=True)
+            self.sets_path.write_text(
+                json.dumps(self._sticker_sets, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        except OSError as e:
+            print(f"[onebot-server] 保存表情包分类设置失败：{e!r}")
+
+    def _index_path(self) -> Optional[Path]:
+        if self.sticker_lib is not None:
+            return Path(self.sticker_lib.index_path)
+        if self.sticker_dir:
+            return self.sticker_dir / "index.json"
+        return None
+
+    def _index_add(self, item: Dict[str, Any]) -> None:
+        if self.sticker_lib is not None:
+            self.sticker_lib.add_item(item)
+            return
+        path = self._index_path()
+        if not path:
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            data.append(item)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[onebot-server] 更新表情索引失败：{e!r}")
+
+    def _index_remove(self, src: Path) -> None:
+        if self.sticker_lib is not None:
+            self.sticker_lib.remove_item(src)
+            return
+        path = self._index_path()
+        if not path or not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            want = str(src.resolve())
+            data = [d for d in data
+                    if str(Path(str(d.get("file", ""))).resolve()) != want]
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[onebot-server] 更新表情索引失败：{e!r}")
+
+    async def _api_sticker_sets(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        return web.json_response({"sets": self._sticker_sets})
+
+    async def _api_sticker_sets_save(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        peer = str(body.get("peer_id") or "")
+        groups = body.get("groups")
+        if not peer or not isinstance(groups, list):
+            return web.json_response({"ok": False, "error": "peer_id/groups"},
+                                     status=400)
+        self._sticker_sets[peer] = [str(g) for g in groups][:100]
+        self._save_sticker_sets()
+        if peer == str(self.cfg.self_id or ""):
+            self._apply_sticker_sources()
+        return web.json_response({"ok": True})
+
+    async def _api_sticker_upload(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.sticker_dir:
+            return web.json_response({"ok": False, "error": "no sticker dir"},
+                                     status=500)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+
+        raw = str(body.get("data") or "")
+        if not raw:
+            return web.json_response({"ok": False, "error": "empty data"}, status=400)
+        if raw.startswith("data:") and "," in raw:
+            header, raw = raw.split(",", 1)
+            if "base64" not in header:
+                return web.json_response({"ok": False, "error": "need base64"},
+                                         status=400)
+        try:
+            blob = base64.b64decode(raw)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad base64"},
+                                     status=400)
+        if len(blob) > 8 * 1024 * 1024:
+            return web.json_response({"ok": False, "error": "too large"}, status=413)
+
+        group = self._sanitize_group(body.get("group") or "custom")
+        name = str(body.get("name") or "sticker")
+        ext = Path(name).suffix.lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+            ext = ".png"
+        stem = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_",
+                      Path(name).stem).strip("._")[:48] or "sticker"
+
+        out_dir = self.sticker_dir / group
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / f"{stem}{ext}"
+        n = 1
+        while dest.exists():
+            dest = out_dir / f"{stem}_{n}{ext}"
+            n += 1
+        try:
+            dest.write_bytes(blob)
+        except OSError as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+        try:
+            from ..sticker import normalize_emotion
+            emo = normalize_emotion(stem.split("_")[0])
+        except Exception:  # noqa: BLE001
+            emo = "中性"
+        item = {
+            "file": str(dest.resolve()),
+            "desc": stem.replace("_", " "),
+            "emotions": [emo],
+            "raw_emotion": emo,
+            "tags": [group, "custom", "自建"],
+            "source": group,
+        }
+        self._index_add(item)
+        rel = dest.relative_to(self.sticker_dir)
+        print(f"[onebot-server] 新增表情：{rel.as_posix()}")
+        return web.json_response({
+            "ok": True,
+            "group": group,
+            "item": {
+                "url": f"/{_ASSET_PREFIX}/{rel.as_posix()}",
+                "thumb": self._thumb_url(rel),
+                "animated": ext in (".gif", ".webp"),
+                "path": rel.as_posix(),
+                "group": group,
+            },
+        })
+
+    async def _api_sticker_delete(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.sticker_dir:
+            return web.json_response({"ok": False, "error": "no sticker dir"},
+                                     status=500)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        rel = str(body.get("path") or "")
+        try:
+            src = (self.sticker_dir / rel).resolve()
+            src.relative_to(self.sticker_dir)
+        except (ValueError, OSError):
+            return web.json_response({"ok": False, "error": "bad path"}, status=403)
+        if not src.is_file():
+            return web.json_response({"ok": False, "error": "not found"}, status=404)
+        if src.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+            return web.json_response({"ok": False, "error": "not an image"}, status=400)
+        try:
+            src.unlink()
+        except OSError as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        self._index_remove(src)
+        print(f"[onebot-server] 删除表情：{rel}")
+        return web.json_response({"ok": True})
+
+    @staticmethod
+    def _thumb_url(rel: Path) -> str:
+        return "/api/sticker-thumb?p=" + quote(rel.as_posix(), safe="")
+
+    def _thumb_cache_path(self, src: Path) -> Optional[Path]:
+        if not self.thumb_dir:
+            return None
+        try:
+            st = src.stat()
+            key = f"{src}:{st.st_mtime_ns}:{st.st_size}".encode("utf-8")
+        except OSError:
+            return None
+        name = hashlib.sha1(key).hexdigest()[:24] + ".webp"
+        return self.thumb_dir / name[:2] / name
+
+    @staticmethod
+    def _make_thumb(src: Path, dest: Path, size: int = 128) -> None:
+        """生成首帧缩略图（WebP）。Pillow 的阻塞操作由 to_thread 包起来。"""
+        from PIL import Image  # 延迟导入：只有打开表情面板才需要
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(src) as im:
+            try:
+                im.seek(0)
+            except EOFError:
+                pass
+            frame = im.convert("RGBA")
+            frame.thumbnail((size, size), Image.LANCZOS)
+            tmp = dest.with_name(dest.name + "." + uuid.uuid4().hex + ".tmp")
+            frame.save(tmp, "WEBP", quality=82, method=4)
+            tmp.replace(dest)
+
+    async def _sticker_thumb(self, request: web.Request) -> web.StreamResponse:
+        rel = request.query.get("p") or ""
+        if not self.sticker_dir or not rel:
+            return web.Response(status=404)
+        try:
+            src = (self.sticker_dir / rel).resolve()
+            src.relative_to(self.sticker_dir)
+        except (ValueError, OSError):
+            return web.Response(status=403)
+        if not src.is_file():
+            return web.Response(status=404)
+        dest = self._thumb_cache_path(src)
+        if not dest:
+            return web.Response(status=500)
+        if not dest.is_file():
+            try:
+                await asyncio.to_thread(self._make_thumb, src, dest)
+            except Exception as e:  # noqa: BLE001
+                print(f"[onebot-server] 生成缩略图失败 {src.name}: {e!r}")
+                return web.Response(status=500)
+        return web.FileResponse(dest, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=86400, immutable",
+        })
+
+    async def _sticker_file(self, request: web.Request) -> web.StreamResponse:
+        rel = request.match_info["tail"]
+        # 路径穿越防护：解析后的真实路径必须仍在图库目录内
+        if not self.sticker_dir:
+            return web.Response(status=404)
+        try:
+            base = (self.sticker_dir / rel).resolve()
+            base.relative_to(self.sticker_dir)
+        except (ValueError, OSError):
+            return web.Response(status=403)
+        if not base.is_file():
+            return web.Response(status=404)
+        return web.FileResponse(base, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        })
+
+    # ---------------- 全局设置 / 新增角色 ----------------
+
+    async def _api_settings_get(self, _request: web.Request) -> web.Response:
+        if not self.settings_get:
+            return web.json_response({"ok": False, "error": "no settings"}, status=404)
+        try:
+            data = self.settings_get()
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _api_settings_post(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.settings_set:
+            return web.json_response({"ok": False, "error": "no settings"}, status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        try:
+            data = self.settings_set(body if isinstance(body, dict) else {})
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_character_create(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.character_creator:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        name = str((body or {}).get("name") or "").strip()
+        avatar = str((body or {}).get("avatar") or "").strip()
+        if not name:
+            return web.json_response({"ok": False, "error": "请填写角色名"},
+                                     status=400)
+        if len(name) > 24:
+            return web.json_response({"ok": False, "error": "角色名太长（最多 24 字）"},
+                                     status=400)
+        if not avatar:
+            return web.json_response({"ok": False, "error": "请选择头像"},
+                                     status=400)
+        try:
+            data = self.character_creator(name, avatar)
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            print(f"[onebot-server] 新增角色失败：{e!r}")
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    # ---------------- 热情 / 好感 ----------------
+
+    async def _api_traits_get(self, request: web.Request) -> web.Response:
+        if not self.traits_get:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        peer_id = str(request.query.get("peer_id") or "").strip()
+        if not peer_id:
+            return web.json_response({"ok": False, "error": "缺少 peer_id"},
+                                     status=400)
+        try:
+            data = self.traits_get(peer_id)
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_traits_post(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.traits_set:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        body = body if isinstance(body, dict) else {}
+        peer_id = str(body.get("peer_id") or "").strip()
+        if not peer_id:
+            return web.json_response({"ok": False, "error": "缺少 peer_id"},
+                                     status=400)
+        try:
+            data = self.traits_set(peer_id, body.get("enthusiasm"),
+                                   body.get("affection"))
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    # ---------------- 自定义聊天头像 ----------------
+
+    @staticmethod
+    def _avatar_key(peer_id: Any) -> str:
+        """头像文件名只保留安全字符，避免路径穿越。"""
+        return re.sub(r"[^0-9A-Za-z_-]", "", str(peer_id or ""))[:32]
+
+    def _avatar_url(self, key: str) -> str:
+        if not self.avatar_dir:
+            return ""
+        try:
+            st = (self.avatar_dir / f"{key}.png").stat()
+        except OSError:
+            return ""
+        # 带 mtime 版本号：换头像后浏览器不会继续用旧缓存
+        return f"/api/avatar?peer_id={quote(key)}&v={st.st_mtime_ns}"
+
+    async def _api_avatars(self, _request: web.Request) -> web.Response:
+        items: Dict[str, str] = {}
+        if self.avatar_dir and self.avatar_dir.is_dir():
+            for p in self.avatar_dir.glob("*.png"):
+                url = self._avatar_url(p.stem)
+                if url:
+                    items[p.stem] = url
+        return web.json_response({"ok": True, "items": items})
+
+    async def _api_avatar_file(self, request: web.Request) -> web.StreamResponse:
+        key = self._avatar_key(request.query.get("peer_id"))
+        if not key or not self.avatar_dir:
+            return web.Response(status=404)
+        path = self.avatar_dir / f"{key}.png"
+        if not path.is_file():
+            return web.Response(status=404)
+        return web.FileResponse(path, headers={
+            "Cache-Control": "public, max-age=86400",
+        })
+
+    async def _api_avatar_save(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.avatar_dir:
+            return web.json_response({"ok": False, "error": "no avatar dir"},
+                                     status=500)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        key = self._avatar_key(body.get("peer_id"))
+        if not key:
+            return web.json_response({"ok": False, "error": "bad peer_id"},
+                                     status=400)
+
+        raw = str(body.get("data") or "")
+        if not raw:
+            return web.json_response({"ok": False, "error": "empty data"}, status=400)
+        if raw.startswith("data:") and "," in raw:
+            header, raw = raw.split(",", 1)
+            if "base64" not in header:
+                return web.json_response({"ok": False, "error": "need base64"},
+                                         status=400)
+        try:
+            blob = base64.b64decode(raw)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad base64"},
+                                     status=400)
+        if len(blob) > 4 * 1024 * 1024:
+            return web.json_response({"ok": False, "error": "too large"}, status=413)
+
+        try:
+            import io
+
+            from PIL import Image
+
+            with Image.open(io.BytesIO(blob)) as im:
+                im = im.convert("RGB")
+                # 客户端已经裁成 1:1；这里兜底再裁一次并统一到 256
+                if im.width != im.height:
+                    side = min(im.width, im.height)
+                    left = (im.width - side) // 2
+                    top = (im.height - side) // 2
+                    im = im.crop((left, top, left + side, top + side))
+                if im.width != 256:
+                    im = im.resize((256, 256), Image.LANCZOS)
+                self.avatar_dir.mkdir(parents=True, exist_ok=True)
+                dest = self.avatar_dir / f"{key}.png"
+                tmp = dest.with_name(dest.name + "." + uuid.uuid4().hex + ".tmp")
+                im.save(tmp, "PNG", optimize=True)
+                tmp.replace(dest)
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": f"bad image: {e}"},
+                                     status=400)
+
+        print(f"[onebot-server] 更新聊天头像：{key}")
+        return web.json_response({"ok": True, "url": self._avatar_url(key)})
+
+    async def _api_avatar_delete(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        key = self._avatar_key(body.get("peer_id"))
+        if not key or not self.avatar_dir:
+            return web.json_response({"ok": False, "error": "bad peer_id"},
+                                     status=400)
+        dest = self.avatar_dir / f"{key}.png"
+        # 新增角色有原始头像：恢复默认 = 覆盖回原图，而不是删到只剩文字头像
+        pristine = self.avatar_dir.parent / "character_avatars" / f"{key}.png"
+        try:
+            if pristine.is_file():
+                shutil.copyfile(pristine, dest)
+                print(f"[onebot-server] 恢复角色原头像：{key}")
+            else:
+                dest.unlink(missing_ok=True)
+                print(f"[onebot-server] 恢复默认头像：{key}")
+        except OSError as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        return web.json_response({"ok": True})
+
+    async def _healthz(self, _request: web.Request) -> web.Response:
+        return web.json_response({
+            "ok": True, "service": "vol-onebot-server",
+            "clients": len(self._clients)})

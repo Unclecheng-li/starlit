@@ -1,0 +1,181 @@
+# 复制为 config.yaml 后填写
+#
+# 也可以完全不动这个文件：服务起来之后打开网页 →「设置」，
+# 在里面填 API Key / Base URL / 模型即可（会写进 data/settings.json，
+# 优先级高于这里的 llm 段）。开源给别人用时这样最省事。
+
+llm:
+  # 任意 OpenAI 兼容端点都行（DeepSeek / 智谱 / OpenRouter / 本地 vLLM …）
+  base_url: "https://api.deepseek.com"
+  api_key: "sk-替换成你自己的Key"
+  # 注意：DeepSeek 这边必须是 deepseek-flash（它自带识图）。
+  # deepseek-v4-flash / deepseek-v4-flash-vision-exp 是兼容名（路由到同一模型）；
+  # deepseek-v4-pro 是纯文本模型，拿它识图会报错。
+  # 换别家模型时，只要该模型支持图片输入即可。
+  model: "deepseek-flash"
+  timeout: 90    # 单次调用超时。别设太长：网络抖动出现僵尸连接时，
+                 # 一次调用链会挂很久，消息进来毫无反应
+  temperature: 0.9
+
+qq:
+  self_id: "机器人QQ号"            # NapCat 登录的那个 QQ（channel=napcat 时才需要）
+  owner_id: "你自己的QQ号"         # 只对这个人提供完整陪伴能力
+
+  # ── 通道选择 ────────────────────────────────────────────────
+  # napcat        走 QQ：NapCat 反向 WS 连进来。功能最全，有腾讯风控风险
+  # onebot-server 自托管：vol 自己当 OneBot 11 服务端，网页客户端直连，
+  #               完全不碰 QQ，零封号风险（本项目自带一个 QQ 风格网页客户端）
+  channel: "napcat"
+
+  # ── onebot-server 通道（channel=onebot-server 时生效）─────
+  server:
+    listen: "0.0.0.0"
+    port: 8080                     # WS + HTTP API + 表情包下载，同端口
+    token: ""                      # access_token；上公网必填，本机测试可留空
+    base_url: "http://127.0.0.1:8080"  # 对外可达地址（生成图片 URL 用）
+    heartbeat_sec: 25              # 心跳推送周期（客户端靠它判活）
+    owner_nickname: "老师"          # 你在客户端里的显示名
+    bot_nickname: "星野"            # 好友列表里她的显示名
+
+  # ── 群聊响应策略（默认最保守；仅 napcat 通道有意义）──────────
+  # off       任何群消息都不回
+  # mention   被 @ 时回（群里任何成员 @ 它都能让它开口）
+  # allowlist 仅 group_allowlist 列出的群、且被 @ 时回
+  group_mode: "off"
+  group_allowlist: []
+
+  ws:
+    host: "0.0.0.0"
+    port: 6701
+    path: "/onebot/v11/ws"
+    access_token: ""               # 与 NapCat 侧保持一致，留空表示不校验
+  http:
+    # NapCat 的 HTTP 服务。WS 只能被动收事件，主动发消息走这个
+    base_url: "http://127.0.0.1:3000"
+    access_token: ""
+
+behavior:
+  # ── 以下延迟按真实聊天记录校准（统计了近百万条私聊）──
+  # ★ 语义是「距对方最后一条消息的总延迟目标」（追时逻辑）：
+  #   真人好友第一响应距段末 中位 14s / P25 5s / P75 54s。
+  #   合并等待 + 模型推理花掉的时间会从目标里扣掉 —— 处理慢就立即发，
+  #   处理快就多等会儿，总延迟始终贴着真人，不会层层叠加。
+  outbound_delay_ms: [5000, 20000]  # 总延迟目标：中位约 12s
+  chunk_delay_ms: [5000, 20000]     # 长回复拆成两条时，两条之间的间隔
+  sticker_delay_ms: [4000, 9000]    # 文字发完后，补一张表情包之前的间隔
+  split_long_reply: true
+  split_threshold: 28               # 真人单条中位 8~9 字、P90 17~22 字，28 已算长消息
+  max_chunks: 5                     # 一条回复最多拆成几条（防刷屏）
+  bubble_delay_ms: [5000, 20000]    # 拆出来的短消息之间的间隔（真人连发中位 8~10s）
+  short_bubble_delay_ms: [4000, 12000]
+  long_bubble_delay_ms: [7000, 22000]
+
+  # ── 多条消息合并：你连发几条时，她等一小段再一起理解、一次回完 ──
+  merge_window_sec: 9.0            # 最后一条之后等这么久（真人连发间隔中位 9s）
+  merge_max_wait_sec: 30.0         # 但第一条最多等这么久，否则长连发会被切成两批
+  merge_max_msgs: 10               # 一次最多合并几条
+  # 真人 28~40% 的消息是纯表情包/图片；对方只发图时，跟一张图是更真实的回应
+  sticker_only_reply_prob: 0.35
+
+# ── 对话连贯性（解决「一问一答就断」）──────────────────────────
+conversation:
+  enabled: true
+  # 你最后一条消息之后，这段时间内算「还在聊」；
+  # 窗口内她会像真人一样自己把话接下去，窗口外才走慢节奏的主动机制
+  active_window_min: 25
+  # 接话 =「对方没回，过了一会儿又想起一句」，是分钟级的。
+  # 调成几十秒会变成高频独白引擎（实测 4 分钟自顾自说了 19 条）
+  followup_delay_sec: [60, 180]
+  max_bot_turns_without_reply: 5
+  max_followups_per_topic: 3
+  deep_max_bot_turns: 8            # 对方在倾诉/需要安慰时放宽
+  deep_max_followups: 8
+  quiet_hours_max_turns: 1         # 深夜更克制
+  energy_threshold: 25             # 社交电量低于此值不再接话
+  max_burst_bubbles: 5             # 连发上限按「气泡」计（真人中位 3 条、P75 5~7）
+  deep_max_burst_bubbles: 9
+  followup_backoff_sec:            # 无回应阶梯退避：第 1 次用上面的间隔，
+    - [120, 300]                   # 第 2 次等 2~5 分钟，
+    - [600, 2400]                  # 第 3 次等 10~40 分钟；再往后就停，等对方先开口
+  max_probes_per_topic: 1          # 追问每话题限 1 次（每轮都问 = 查户口）
+  reopen_delay_sec: [1200, 5400]   # 话题聊死 20 分钟 ~ 1.5 小时后考虑自己重启
+  max_reopens: 2
+
+autonomy:
+  enabled: true
+
+  # ── 拟人节奏：四档混合分布，不是固定间隔 ─────────────────
+  # 真人的主动是不规则的：多数时候隔几小时，偶尔很快想说，偶尔一整天不冒头。
+  # 「马上」这档必须有 —— 没有它，最早也要等十几分钟，体感就是定时任务
+  rhythm:
+    instant: [1, 8]        # 1~8 分钟：忽然想起你，立刻冒一句
+    near: [20, 120]        # 20 分钟~2 小时：刚聊完意犹未尽
+    normal: [120, 480]     # 2~8 小时：日常节奏
+    long: [720, 2880]      # 12~48 小时：忙、累、或者就是没话说
+    weights: [0.30, 0.32, 0.27, 0.11]   # 马上/近/常/远
+  state_influence: 0.7     # 情绪对节奏的影响（越孤独焦虑越早，电量越低越拖）
+  skip_probability: 0.15   # 到点后仍有这个概率「这轮先不开口」，顺延一轮
+
+  heartbeat:               # 兜底：上面 weights 留空时才用这个固定间隔
+    base_interval_min: 210
+    jitter_min: 60
+
+  quiet_hours: ["00:30", "08:30"]   # 免打扰时段
+  min_gap_min: 25                   # 两次主动之间的最小间隔
+  cold_streak_limit: 2              # 连续 N 次主动没回报 → 进入「静默→回来关心」循环
+  energy_threshold: 30              # 社交电量低于此值不主动
+  daily_max: 14                     # 每天主动上限
+
+  # ── 冷场后的「静默 → 回来关心」循环 ────────────────────
+  # 不要因为「发了几条没回」就永久停掉。真人会先收一收、静默久一点，
+  # 然后回来问一句「你还好吗」，之后再继续分享
+  silence_min: 60
+  silence_growth: 1.6
+  silence_max_min: 480
+  checkin_kinds: ["miss", "mood", "miss", "miss"]
+
+  # ── 自主浏览：自己上网找东西 → 分享给你 ──────────────
+  # 搜什么由「兴趣图谱」决定（persona/interests.md 是种子，聊天里会自动扩充）
+  digest_enabled: true
+  digest_interval_min: 90
+  digest_max_share_per_day: 3
+  digest_threshold: 0.42           # 分享阈值，越低越爱分享
+
+  greet_on_start: true             # 上线主动发一条
+  greet_delay_sec: 20
+
+memory:
+  db_path: "./data/companion.db"
+  sticker_dir: "./data/stickers"
+  sticker_index: "./data/stickers/index.json"
+  recall_top_k: 6
+
+# ── 表情包 ────────────────────────────────────────────────────
+sticker:
+  enabled: true
+  base_probability: 0.50           # 再乘上「对话情绪强度」与「她当时的心情」
+  min_gap_min: 0                   # 0 = 不做时间限制，交给语境判断
+  daily_max: 45
+  energy_threshold: 25
+  extra_dirs: []                   # 图库目录：data/stickers/<来源>/...
+  max_per_turn: 2
+  steal_enabled: true              # 看到你发的图，按自己的口味决定收不收
+  steal_probability: 0.55
+  steal_daily_max: 8
+  steal_from_groups: false
+
+search:
+  # 留空 = 未配置，自主浏览会跳过联网（不会返回假数据）
+  #
+  #   searx   —— ★ 完全免注册、免付费。自己跑一个 SearXNG 实例，
+  #              打它的本地 JSON 接口，只需填 endpoint（推荐）
+  #   google  —— 有免费额度（100 次/天），要多填一个 cx
+  #   tavily / serper / bocha —— 付费，要注册、要 key
+  provider: ""
+  endpoint: ""                     # searx 用这个，例：http://127.0.0.1:8888
+  api_key: ""
+  cx: ""                           # 只有 google 需要
+
+tts:
+  provider: ""                     # 尚未接入，接口已留好
+  endpoint: ""

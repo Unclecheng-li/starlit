@@ -1,0 +1,647 @@
+﻿<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#0099ff">
+  <link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb3d9'/%3E%3Cstop offset='.55' stop-color='%23a48bff'/%3E%3Cstop offset='1' stop-color='%236fa8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M13 21a9 9 0 0 1 9-9h20a9 9 0 0 1 9 9v12a9 9 0 0 1-9 9H31l-9 8v-8a9 9 0 0 1-9-9Z' fill='%23fff' opacity='.95'/%3E%3Cpath d='m32 18 2.7 6.1 6.6.7-4.9 4.4 1.4 6.4L32 32.3l-5.8 3.3 1.4-6.4-4.9-4.4 6.6-.7Z' fill='%237a5cff'/%3E%3Ccircle cx='49' cy='15' r='2.4' fill='%23fff'/%3E%3C/svg%3E">
+  <title>星野 · vol</title>
+  <link rel="stylesheet" href="./app.css?v=20261018c">
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-chat" viewBox="0 0 24 24">
+    <path d="M20.5 11.6c0 4.2-3.8 7.6-8.5 7.6-1 0-2-.2-2.9-.5L4 20l1.2-4.2A7.3 7.3 0 0 1 3.5 11.6C3.5 7.4 7.3 4 12 4s8.5 3.4 8.5 7.6Z"/>
+  </symbol>
+  <symbol id="i-smile" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.5"/><path d="M8.5 14.2c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8"/>
+    <path d="M9 9.6h.01M15 9.6h.01"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24">
+    <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4 8.4 8.4 0 1 0 20 14.2Z"/>
+  </symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/>
+  </symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="3.2"/>
+    <path d="M19.4 13.6a7.8 7.8 0 0 0 0-3.2l2-1.5-2-3.4-2.3.9a7.8 7.8 0 0 0-2.8-1.6L14 2h-4l-.3 2.8a7.8 7.8 0 0 0-2.8 1.6l-2.3-.9-2 3.4 2 1.5a7.8 7.8 0 0 0 0 3.2l-2 1.5 2 3.4 2.3-.9a7.8 7.8 0 0 0 2.8 1.6L10 22h4l.3-2.8a7.8 7.8 0 0 0 2.8-1.6l2.3.9 2-3.4-2-1.5Z"/>
+  </symbol>
+  <symbol id="i-image" viewBox="0 0 24 24">
+    <rect x="3.5" y="4.5" width="17" height="15" rx="3"/>
+    <circle cx="9" cy="10" r="1.6"/><path d="m4.5 17 4.7-4.4 3.3 3 2.6-2.4 4.4 4.3"/>
+  </symbol>
+  <symbol id="i-search" viewBox="0 0 24 24">
+    <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2"/>
+  </symbol>
+  <symbol id="i-more" viewBox="0 0 24 24">
+    <circle cx="5.5" cy="12" r="1.1" fill="currentColor" stroke="none"/>
+    <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none"/>
+    <circle cx="18.5" cy="12" r="1.1" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-back" viewBox="0 0 24 24">
+    <path d="M14.5 5.5 8 12l6.5 6.5"/>
+  </symbol>
+  <symbol id="i-send" viewBox="0 0 24 24">
+    <path d="M4.2 11.3 19.4 4.6c.6-.3 1.2.3.9.9l-6.7 15.2c-.3.7-1.3.6-1.5-.1l-1.5-5.6-5.6-1.5c-.7-.2-.8-1.2-.1-1.5Z"/>
+    <path d="m11 13 3.6-3.6"/>
+  </symbol>
+  <symbol id="i-sticker" viewBox="0 0 24 24">
+    <path d="M20 12.5V8a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4h4.5L20 12.5Z"/>
+    <path d="M20 12.5h-3.5a4 4 0 0 0-4 4V20"/>
+    <path d="M8.5 9.5h.01M14 9.5h.01M9.5 13.4c.7.7 1.5 1 2.5 1"/>
+  </symbol>
+  <symbol id="i-close" viewBox="0 0 24 24">
+    <path d="m6 6 12 12M18 6 6 18"/>
+  </symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24">
+    <path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v4.5h-4.5"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24">
+    <path d="M4.5 7h15M9.5 7V4.8h5V7M7 7l.8 12.2h8.4L17 7"/>
+  </symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24">
+    <rect x="8.5" y="8.5" width="11" height="11" rx="2.5"/>
+    <path d="M15.5 8.5v-2a2.5 2.5 0 0 0-2.5-2.5H6.5A2.5 2.5 0 0 0 4 6.5V13a2.5 2.5 0 0 0 2.5 2.5h2"/>
+  </symbol>
+  <symbol id="i-forward" viewBox="0 0 24 24">
+    <path d="M4 12h12M12 6l6 6-6 6"/>
+  </symbol>
+  <symbol id="i-recall" viewBox="0 0 24 24">
+    <path d="M4 10h9a5 5 0 0 1 0 10h-3M4 10l4-4M4 10l4 4"/>
+  </symbol>
+  <symbol id="i-select" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.5"/>
+    <path d="m8.5 12 2.4 2.4 4.6-5"/>
+  </symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24">
+    <path d="M12 3a9 9 0 1 0 0 18h1.2a2.1 2.1 0 0 0 1.6-3.5 2.1 2.1 0 0 1 1.6-3.5H18a3 3 0 0 0 3-3A9 9 0 0 0 12 3Z"/>
+    <circle cx="7.5" cy="11" r="1" fill="currentColor" stroke="none"/>
+    <circle cx="11" cy="7.5" r="1" fill="currentColor" stroke="none"/>
+    <circle cx="15.5" cy="8.5" r="1" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24">
+    <path d="M12 5v14M5 12h14"/>
+  </symbol>
+  <symbol id="i-contact" viewBox="0 0 24 24">
+    <circle cx="12" cy="8.5" r="3.5"/>
+    <path d="M5 20c.6-3.6 3.4-5.6 7-5.6s6.4 2 7 5.6"/>
+  </symbol>
+  <symbol id="i-user" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="10" r="3"/>
+    <path d="M6.8 18.4c.7-2.4 2.7-3.8 5.2-3.8s4.5 1.4 5.2 3.8"/>
+  </symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24">
+    <path d="M4 20h4.2L19 9.2a2.1 2.1 0 0 0-3-3L5.2 17 4 20Z"/>
+    <path d="m14.5 7.7 3 3"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24">
+    <path d="m5 12.5 4.5 4.5L19 7"/>
+  </symbol>
+</svg>
+
+<!-- ================= 连接页 ================= -->
+<section id="connectView" class="connect">
+  <div class="connect-sky"><i></i><i></i><i></i></div>
+  <div class="connect-card">
+    <div class="brand-avatar"><span>星</span><em></em></div>
+    <h1>星野</h1>
+    <p class="brand-sub">vol · 只属于你的 AI 伙伴</p>
+    <div class="connect-state" id="connectState">
+      <span class="pulse"></span><span id="connectStateText">正在连接…</span>
+    </div>
+    <button class="primary" id="connectBtn">重新连接</button>
+    <div class="token-row hidden" id="tokenRow">
+      <label for="tokenInput">访问令牌（access_token）</label>
+      <div class="token-input">
+        <input id="tokenInput" type="password" autocomplete="off" placeholder="留空表示服务端未启用鉴权">
+        <button id="tokenSave">连接</button>
+      </div>
+    </div>
+    <p class="connect-tip" id="connectTip">请通过 vol 启动后的地址打开本页面（http://127.0.0.1:8080/）</p>
+  </div>
+</section>
+
+<!-- ================= 主界面 ================= -->
+<div class="app hidden" id="appView">
+  <!-- 左侧功能栏 -->
+  <aside class="rail">
+    <div class="rail-avatar" id="railAvatar" title="我">我</div>
+    <nav class="rail-nav">
+      <button class="rail-btn active" data-tip="消息" aria-label="消息">
+        <svg><use href="#i-chat"/></svg>
+      </button>
+      <button class="rail-btn" id="railSticker" data-tip="表情包" aria-label="表情包">
+        <svg><use href="#i-sticker"/></svg>
+      </button>
+      <button class="rail-btn" id="railTheme" data-tip="切换主题" aria-label="切换主题">
+        <svg class="ic-moon"><use href="#i-moon"/></svg>
+        <svg class="ic-sun"><use href="#i-sun"/></svg>
+      </button>
+    </nav>
+    <div class="rail-foot">
+      <button class="rail-btn" id="railSettings" data-tip="设置" aria-label="设置">
+        <svg><use href="#i-gear"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- 会话列表 -->
+  <aside class="list-pane">
+    <header class="list-head">
+      <div class="mobile-head">
+        <div class="avatar mh-avatar" id="mobileAvatar"><span>我</span></div>
+        <div class="mh-info">
+          <div class="mh-name" id="mobileName">我</div>
+          <div class="mh-status"><i></i><span id="mobileStatus">在线</span></div>
+        </div>
+        <button class="mh-plus" id="mobilePlus" aria-label="更多">
+          <svg><use href="#i-plus"/></svg>
+        </button>
+      </div>
+      <div class="me-line">
+        <span class="me-name" id="meName">我</span>
+        <span class="conn-chip" id="connChip"><i></i><span>连接中</span></span>
+        <div class="mobile-tools">
+          <button class="icon-btn" id="mobileTheme" title="切换主题" aria-label="切换主题">
+            <svg class="ic-moon"><use href="#i-moon"/></svg>
+            <svg class="ic-sun"><use href="#i-sun"/></svg>
+          </button>
+          <button class="icon-btn" id="mobileSettings" title="设置" aria-label="设置">
+            <svg><use href="#i-gear"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="search-box">
+        <svg><use href="#i-search"/></svg>
+        <input id="searchInput" type="search" placeholder="搜索" autocomplete="off">
+      </div>
+    </header>
+    <div class="conv-list" id="convList"></div>
+    <footer class="list-foot">
+      <span>vol · 本地直连</span>
+      <span class="ver" id="verText"></span>
+    </footer>
+  </aside>
+
+  <!-- 聊天区 -->
+  <main class="chat-pane" id="chatPane">
+    <header class="chat-head">
+      <button class="icon-btn back-btn" id="backBtn" aria-label="返回">
+        <svg><use href="#i-back"/></svg>
+      </button>
+      <div class="chat-title">
+        <div class="name-row">
+          <span id="chatName">星野</span>
+          <span class="online-dot" id="onlineDot"></span>
+        </div>
+        <div class="sub-row" id="chatSub">连接中…</div>
+      </div>
+      <div class="chat-actions">
+        <button class="icon-btn" id="btnChatStyle" title="聊天设置" aria-label="聊天设置">
+          <svg><use href="#i-palette"/></svg>
+        </button>
+        <button class="icon-btn" id="btnSearchMsg" title="搜索聊天记录" aria-label="搜索聊天记录">
+          <svg><use href="#i-search"/></svg>
+        </button>
+        <button class="icon-btn" id="btnMore" title="更多" aria-label="更多">
+          <svg><use href="#i-more"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="chat-search hidden" id="chatSearch">
+      <svg><use href="#i-search"/></svg>
+      <input id="chatSearchInput" type="search" placeholder="搜索聊天记录，回车定位" autocomplete="off">
+      <span class="search-count" id="searchCount"></span>
+      <button class="icon-btn" id="searchClose"><svg><use href="#i-close"/></svg></button>
+    </div>
+
+    <div class="msg-scroll" id="msgScroll">
+      <div class="msg-list" id="msgList">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-avatar" id="emptyAvatar">星</div>
+          <p>和星野打个招呼吧</p>
+          <span>消息会在你们之间同步，换设备也不会丢</span>
+        </div>
+      </div>
+      <button class="to-bottom hidden" id="toBottom" aria-label="回到底部">
+        <svg><use href="#i-back"/></svg>
+        <span class="badge small hidden" id="toBottomBadge">0</span>
+      </button>
+    </div>
+
+    <!-- 鼠标框选 -->
+    <div class="marquee-box hidden" id="marqueeBox"></div>
+
+    <!-- 多选消息操作栏 -->
+    <div class="multi-bar hidden" id="multiBar">
+      <div class="multi-count" id="multiCount">已选 0 条</div>
+      <div class="multi-actions">
+        <button class="multi-btn" data-multi="forward-each" title="逐条转发">
+          <svg><use href="#i-forward"/></svg><span>逐条转发</span>
+        </button>
+        <button class="multi-btn" data-multi="forward-merge" title="合并转发">
+          <svg><use href="#i-forward"/></svg><span>合并转发</span>
+        </button>
+        <button class="multi-btn" data-multi="copy" title="复制">
+          <svg><use href="#i-copy"/></svg><span>复制</span>
+        </button>
+        <button class="multi-btn danger" data-multi="recall" title="撤回">
+          <svg><use href="#i-recall"/></svg><span>撤回</span>
+        </button>
+        <button class="multi-btn" data-multi="cancel" title="退出多选">
+          <svg><use href="#i-close"/></svg><span>取消</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="composer" id="composer">
+      <div class="composer-box">
+        <div class="composer-row">
+          <textarea id="input" rows="1" maxlength="4000" placeholder="和星野说点什么…"></textarea>
+        </div>
+        <div class="composer-bar">
+          <div class="tools">
+            <button class="tool-btn" id="emojiBtn" title="表情" aria-label="表情">
+              <svg><use href="#i-smile"/></svg>
+            </button>
+            <button class="tool-btn" id="stickerBtn" title="表情包" aria-label="表情包">
+              <svg><use href="#i-sticker"/></svg>
+            </button>
+            <button class="tool-btn" id="imageBtn" title="图片" aria-label="发送图片">
+              <svg><use href="#i-image"/></svg>
+            </button>
+            <button class="tool-btn mobile-only" id="mobileMoreBtn" title="更多" aria-label="更多">
+              <svg><use href="#i-plus"/></svg>
+            </button>
+          </div>
+          <div class="send-wrap">
+            <span class="send-hint">Enter 发送 · Shift + Enter 换行</span>
+            <button class="send-btn desktop-send" id="sendBtn" disabled>
+              <span>发送</span><svg><use href="#i-send"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <input type="file" id="fileInput" accept="image/*" multiple hidden>
+    </div>
+
+    <!-- 表情面板 -->
+    <div class="panel hidden" id="emojiPanel">
+      <div class="panel-head">
+        <div class="tabs" id="emojiTabs"></div>
+        <button class="icon-btn panel-close" data-close="emojiPanel"><svg><use href="#i-close"/></svg></button>
+      </div>
+      <div class="emoji-grid" id="emojiGrid"></div>
+    </div>
+
+    <!-- 表情包面板 -->
+    <div class="panel tall hidden" id="stickerPanel">
+      <div class="panel-head">
+        <div class="tabs scroll-x" id="stickerTabs"></div>
+        <div class="sticker-tools">
+          <button class="ghost mini-btn" id="stickerManageBtn">管理</button>
+          <input id="stickerSearch" type="search" placeholder="搜索表情" autocomplete="off">
+          <button class="icon-btn panel-close" data-close="stickerPanel"><svg><use href="#i-close"/></svg></button>
+        </div>
+      </div>
+      <div class="sticker-manage-bar hidden" id="stickerManageBar">
+        <span>点 × 删除，点 + 添加图片</span>
+        <button class="ghost mini-btn" id="stickerCategoryAdd">+ 分类</button>
+        <button class="ghost mini-btn danger" id="stickerCategoryDel">删分类</button>
+        <button class="ghost mini-btn" id="stickerAddBtn">+ 添加</button>
+      </div>
+      <div class="sticker-grid" id="stickerGrid"></div>
+      <div class="panel-empty hidden" id="stickerEmpty">没有找到这个表情…</div>
+      <input type="file" id="stickerUploadInput" accept="image/*" multiple hidden>
+    </div>
+
+    <div class="drop-mask hidden" id="dropMask"><div>松手发送图片</div></div>
+  </main>
+
+  <!-- 手机底部导航 -->
+  <nav class="mobile-nav" id="mobileNav">
+    <button class="mn-item active" data-tab="messages">
+      <span class="mn-icon"><svg><use href="#i-chat"/></svg><em class="badge small hidden" id="navBadge">0</em></span>
+      <span>消息</span>
+    </button>
+    <button class="mn-item" data-tab="contacts">
+      <span class="mn-icon"><svg><use href="#i-contact"/></svg></span>
+      <span>联系人</span>
+    </button>
+    <button class="mn-item" data-tab="stickers">
+      <span class="mn-icon"><svg><use href="#i-sticker"/></svg></span>
+      <span>表情</span>
+    </button>
+    <button class="mn-item" data-tab="me">
+      <span class="mn-icon"><svg><use href="#i-user"/></svg></span>
+      <span>我的</span>
+    </button>
+  </nav>
+
+  <!-- 手机联系人页 -->
+  <section class="mobile-page hidden" id="contactsPage">
+    <header class="mp-head">
+      <button class="icon-btn" id="contactsBack" aria-label="返回">
+        <svg><use href="#i-back"/></svg>
+      </button>
+      <h2>联系人</h2>
+      <button class="icon-btn" id="contactsAdd" aria-label="更多"><svg><use href="#i-plus"/></svg></button>
+    </header>
+    <div class="mp-body">
+      <div class="mp-section">我的好友</div>
+      <div id="contactList"></div>
+      <div class="mp-section">本机</div>
+      <div class="mp-contact static">
+        <div class="mp-icon"><svg><use href="#i-chat"/></svg></div>
+        <div class="mp-contact-main">
+          <strong>网页版</strong>
+          <span>已登录 · 消息多端同步</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="action-sheet hidden" id="mobileActions">
+    <div class="sheet">
+      <button data-act="chatStyle"><svg><use href="#i-palette"/></svg>聊天设置</button>
+      <button data-act="multiselect"><svg><use href="#i-select"/></svg>多选消息</button>
+      <button data-act="stickerManage"><svg><use href="#i-edit"/></svg>管理表情包</button>
+      <button data-act="theme"><svg><use href="#i-moon"/></svg>切换主题</button>
+      <button data-act="settings"><svg><use href="#i-gear"/></svg>设置</button>
+      <button data-act="close" class="cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 右键菜单 -->
+<div class="ctx-menu hidden" id="ctxMenu">
+  <button data-act="copy"><svg><use href="#i-copy"/></svg>复制文字</button>
+  <button data-act="resend"><svg><use href="#i-refresh"/></svg>重新发送</button>
+  <button data-act="recall" class="danger"><svg><use href="#i-recall"/></svg>撤回消息</button>
+  <button data-act="delete"><svg><use href="#i-trash"/></svg>删除本地显示</button>
+</div>
+
+<!-- 更多菜单 -->
+<div class="ctx-menu hidden" id="moreMenu">
+  <button data-act="multiselect"><svg><use href="#i-select"/></svg>多选消息</button>
+  <button data-act="chatStyle"><svg><use href="#i-palette"/></svg>聊天设置</button>
+  <button data-act="stickerManage"><svg><use href="#i-edit"/></svg>管理表情包</button>
+  <button data-act="reconnect"><svg><use href="#i-refresh"/></svg>重新连接</button>
+  <button data-act="clear">清空本地显示</button>
+  <button data-act="stapxs">打开经典客户端（Stapxs）</button>
+</div>
+
+<!-- 转发目标 -->
+<div class="modal-mask hidden" id="forwardMask">
+  <div class="modal mini-modal">
+    <header class="modal-head">
+      <h2 id="forwardTitle">转发到</h2>
+      <button class="icon-btn" id="forwardClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="forward-list" id="forwardList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 图片预览 -->
+<div class="lightbox hidden" id="lightbox">
+  <img id="lightboxImg" alt="">
+  <button class="lightbox-close" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
+</div>
+
+<!-- 聊天设置（只对当前对话生效） -->
+<div class="modal-mask hidden" id="chatSettingsMask">
+  <div class="modal chat-modal">
+    <header class="modal-head cs-head">
+      <div class="avatar bot-avatar" id="csAvatar"><span>星</span></div>
+      <div class="cs-head-info">
+        <h2 id="csTitle">星野</h2>
+        <span>头像 / 气泡 · 只对这个对话生效</span>
+      </div>
+      <button class="icon-btn" id="chatSettingsClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="cs-section cs-avatar-section">
+        <div class="cs-label">聊天对象头像</div>
+        <div class="cs-avatar-row">
+          <div class="avatar bot-avatar cs-avatar-preview" id="csAvatarPreview" title="点击更换头像"><span>星</span></div>
+          <div class="cs-avatar-actions">
+            <button class="ghost mini-btn" id="csAvatarPick">更换头像</button>
+            <button class="ghost mini-btn" id="csAvatarReset">恢复默认</button>
+          </div>
+        </div>
+        <p class="cs-hint">上传后拖动、缩放选择区域，和 QQ 换头像一样。</p>
+      </div>
+
+      <div class="cs-section">
+        <div class="cs-label">关系参数</div>
+        <label class="trait-row">
+          <span class="trait-name">热情</span>
+          <input type="range" id="csEnthusiasm" min="0" max="100" step="1" value="50">
+          <span class="trait-val" id="csEnthusiasmVal">50</span>
+        </label>
+        <label class="trait-row">
+          <span class="trait-name">好感</span>
+          <input type="range" id="csAffection" min="0" max="100" step="1" value="60">
+          <span class="trait-val" id="csAffectionVal">60</span>
+        </label>
+        <p class="cs-hint" id="csTraitPreview">参考真实聊天：主动约 1.2 次/天 · 回复约 24 秒</p>
+        <div class="trait-actions">
+          <button class="ghost mini-btn" id="csTraitSave">保存关系参数</button>
+        </div>
+        <p class="cs-hint">热情影响主动找你的频率和回复速度；好感影响关心、好奇、黏人和暧昧程度。</p>
+      </div>
+
+      <div class="seg cs-side" id="csSideSeg">
+        <button data-side="in" class="active">星野的气泡</button>
+        <button data-side="out">我的气泡</button>
+      </div>
+
+      <div class="cs-section">
+        <div class="cs-label">样式</div>
+        <div class="bubble-opts" id="csStyles"></div>
+      </div>
+
+      <div class="cs-section">
+        <div class="cs-label">
+          <span>自定义颜色</span>
+          <label class="switch"><input type="checkbox" id="csCustom"><i></i></label>
+        </div>
+        <div class="cs-colors" id="csColors">
+          <label>背景 1<input type="color" id="csBg1"></label>
+          <label>背景 2<input type="color" id="csBg2"></label>
+          <label>文字<input type="color" id="csFg"></label>
+          <button class="ghost mini-btn" id="csResetColor">默认色</button>
+        </div>
+      </div>
+
+      <div class="cs-section">
+        <div class="cs-label">角标 / 签名</div>
+        <div class="chips" id="csTags"></div>
+        <input class="cs-input" id="csTagInput" maxlength="12" placeholder="自定义角标，例如 MUM / ♡">
+      </div>
+
+      <div class="cs-section">
+        <div class="cs-label">可爱装饰</div>
+        <div class="chips" id="csDecos"></div>
+        <input class="cs-input" id="csDecoInput" maxlength="16" placeholder="自定义颜文字，例如 (๑>ᴗ<๑)">
+      </div>
+
+      <div class="cs-section">
+        <div class="cs-label">这个对话可用的表情包</div>
+        <div class="chips cs-groups" id="csStickerGroups"></div>
+        <p class="cs-hint">取消勾选后，星野不会使用这些表情包，表情面板里也不显示。</p>
+      </div>
+
+      <div class="cs-preview">
+        <div class="msg-row in" id="csPreviewIn">
+          <div class="avatar bot-avatar" id="csPreviewInAvatar"><span>星</span></div>
+          <div class="msg-body"><div class="bubble">被子裹严点</div></div>
+        </div>
+        <div class="msg-row out" id="csPreviewOut">
+          <div class="avatar me-avatar" id="csPreviewOutAvatar"><span>我</span></div>
+          <div class="msg-body"><div class="bubble">好呀，我马上到</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 更换头像：QQ 式拖动 / 缩放裁剪 -->
+<div class="modal-mask hidden" id="avatarMask">
+  <div class="modal avatar-modal">
+    <header class="modal-head">
+      <h2>更换头像</h2>
+      <button class="icon-btn" id="avatarClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="avatar-crop-stage" id="avatarStage">
+        <img id="avatarCropImg" alt="">
+        <span class="avatar-crop-ring"></span>
+      </div>
+      <div class="avatar-crop-zoom">
+        <span>−</span>
+        <input type="range" id="avatarZoom" min="100" max="400" value="100" aria-label="缩放">
+        <span>+</span>
+      </div>
+      <p class="cs-hint avatar-crop-hint">在圆圈内拖动调整位置，滚轮或滑杆缩放。</p>
+      <div class="modal-actions">
+        <button class="ghost" id="avatarRepick">重新选择</button>
+        <button class="ghost" id="avatarCancel">取消</button>
+        <button class="btn-primary" id="avatarConfirm">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+<input type="file" id="avatarFileInput" accept="image/*" hidden>
+
+<!-- 新建表情分类 -->
+<div class="modal-mask hidden" id="categoryMask">
+  <div class="modal mini-modal">
+    <header class="modal-head">
+      <h2>新建表情分类</h2>
+      <button class="icon-btn" id="categoryClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <input class="cs-input" id="categoryName" maxlength="24" placeholder="例如：星野日常 / 猫猫">
+      <p class="cs-hint">新建后可以往这个分类里添加图片，也可以随时删除。</p>
+      <div class="modal-actions">
+        <button class="ghost" id="categoryCancel">取消</button>
+        <button class="btn-primary" id="categoryCreate">创建</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="modal-mask hidden" id="settingsMask">
+  <div class="modal" id="settings">
+    <header class="modal-head">
+      <h2>设置</h2>
+      <button class="icon-btn" id="settingsClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="setting-row">
+        <div><strong>主题</strong><span>经典 QQ 蓝白 / 夜间玻璃</span></div>
+        <div class="seg" id="themeSeg">
+          <button data-theme="light">浅色</button>
+          <button data-theme="dark">深色</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><strong>聊天气泡</strong><span>在聊天窗口右上角的调色板里，按对话单独设置</span></div>
+        <button class="ghost" id="settingsChatStyle">去设置</button>
+      </div>
+      <div class="setting-row column">
+        <div><strong>访问令牌</strong><span>服务端 qq.server.token 有值时填写</span></div>
+        <div class="token-input">
+          <input id="settingsToken" type="password" autocomplete="off" placeholder="未设置">
+          <button id="settingsTokenSave">保存</button>
+        </div>
+      </div>
+      <div class="setting-row column">
+        <div><strong>模型 API</strong><span>全局设置 · 保存后立即生效，重启也保留</span></div>
+        <div class="setting-stack">
+          <input class="cs-input" id="settingsApiKey" type="password" autocomplete="off" placeholder="API Key（留空则不修改）">
+          <input class="cs-input" id="settingsBaseUrl" placeholder="https://api.deepseek.com">
+          <input class="cs-input" id="settingsModel" placeholder="deepseek-flash">
+          <div class="setting-inline">
+            <span class="cs-hint" id="settingsApiState">未配置</span>
+            <button class="btn-primary mini-btn" id="settingsLlmSave">保存模型设置</button>
+          </div>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><strong>添加角色</strong><span>头像 + 名字，自动联网搜索并蒸馏人设</span></div>
+        <button class="ghost" id="settingsAddCharacter">添加</button>
+      </div>
+      <div class="setting-row">
+        <div><strong>连接地址</strong><span id="settingsUrl">-</span></div>
+        <button class="ghost" id="settingsReconnect">重新连接</button>
+      </div>
+      <div class="setting-row">
+        <div><strong>经典客户端</strong><span>Stapxs QQ Lite（功能更全）</span></div>
+        <button class="ghost" id="settingsStapxs">打开</button>
+      </div>
+      <div class="setting-row about">
+        <div><strong>vol</strong><span>自建聊天页面 · OneBot 11 直连</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 添加角色：头像 + 名字 → 联网蒸馏人设 -->
+<div class="modal-mask hidden" id="characterMask">
+  <div class="modal mini-modal">
+    <header class="modal-head">
+      <h2>添加角色</h2>
+      <button class="icon-btn" id="characterClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="char-add-row">
+        <div class="avatar char-preview" id="characterPreview"><span>?</span></div>
+        <div class="char-add-info">
+          <button class="ghost mini-btn" id="characterPickAvatar">选择头像</button>
+          <p class="cs-hint">建议正方形，服务端会自动裁成 256×256。</p>
+        </div>
+      </div>
+      <input class="cs-input" id="characterName" maxlength="24" placeholder="角色名，例如：天童爱丽丝">
+      <p class="cs-hint" id="characterStatus">添加后会联网搜索资料并蒸馏人设，可能需要几十秒。</p>
+      <div class="modal-actions">
+        <button class="ghost" id="characterCancel">取消</button>
+        <button class="btn-primary" id="characterCreate">开始蒸馏并添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+<input type="file" id="characterAvatarInput" accept="image/*" hidden>
+
+<div class="toast hidden" id="toast"></div>
+<script src="./app.js?v=20261018c"></script>
+</body>
+</html>

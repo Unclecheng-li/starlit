@@ -1,0 +1,78 @@
+# ══════════════════════════════════════════════════════════════
+# 个人数据 / 敏感信息 —— 绝不外传
+# 你在本地跑起来之后，下面这些都会自动生成，里面是你自己的东西。
+# 注意：gitignore 不支持「规则 + 行内注释」，注释必须单独占一行。
+# ══════════════════════════════════════════════════════════════
+
+# 你的配置（含 API Key、两个 QQ 号、通道 token）
+专属AI伴侣/companion/config.yaml
+
+# 每个角色的聊天库、记忆、情绪状态
+专属AI伴侣/companion/data/characters/
+
+# 角色头像（第三方美术素材）
+专属AI伴侣/companion/data/avatars/
+专属AI伴侣/companion/data/character_avatars/
+
+# 表情包图库（体积大，且多为第三方素材）
+专属AI伴侣/companion/data/stickers/
+专属AI伴侣/companion/data/sticker_thumbs/
+专属AI伴侣/companion/data/failed_images/
+
+# 运行产物
+专属AI伴侣/companion/data/*.db
+专属AI伴侣/companion/data/*.db-shm
+专属AI伴侣/companion/data/*.db-wal
+专属AI伴侣/companion/data/*.log
+专属AI伴侣/companion/data/*.jsonl
+
+# 由你自己的聊天记录 / 角色列表生成的统计与参数
+专属AI伴侣/companion/data/chat_frequency_stats.json
+专属AI伴侣/companion/data/character_traits.json
+
+# ══════════════════════════════════════════════════════════════
+# 第三方 / 二进制 —— 不入库，按文档自行安装
+# ══════════════════════════════════════════════════════════════
+
+# NapCat + 便携 QQ（含登录态与账号配置）
+napcat/
+
+# SearXNG 源码
+searxng/
+
+# Stapxs QQ Lite 预编译产物
+专属AI伴侣/companion/data/webapp/
+
+# 本地工作区
+.workbuddy/
+
+# 个人聊天归档
+分享归档/
+
+# 进程 PID
+run/
+
+# ══════════════════════════════════════════════════════════════
+# 运行时 / 开发环境
+# ══════════════════════════════════════════════════════════════
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.pid
+napcat_repair_log.txt
+*.egg-info/
+
+# ══════════════════════════════════════════════════════════════
+# 编辑器 / 系统
+# ══════════════════════════════════════════════════════════════
+
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
