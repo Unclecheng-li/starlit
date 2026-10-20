@@ -916,8 +916,8 @@ class GroupRuntime:
         ("bubbles_per_turn", "一次最多几条气泡", "int", 1, 20, 1, "条"),
         ("min_gap_member_sec", "同一人两次发言间隔", "int", 0, 600, 5, "秒"),
         ("chain_reply_probability", "有人说完后别人接话的概率", "pct", 0, 100, 5, "%"),
-        ("ambient_gap_lo", "群自己起话头的最小间隔", "int", 2, 240, 1, "分"),
-        ("ambient_gap_hi", "群自己起话头的最大间隔", "int", 3, 480, 1, "分"),
+        ("ambient_gap_lo", "群自己起话头的最小间隔", "int", 1, 240, 1, "分"),
+        ("ambient_gap_hi", "群自己起话头的最大间隔", "int", 1, 480, 1, "分"),
         ("ambient_enabled", "让群自己起话头", "bool", 0, 1, 1, ""),
     ]
 
@@ -1565,9 +1565,12 @@ class GroupRuntime:
         self._roll_round(now)
         if now < self._cooldown_until:
             return None
-        # 群里刚有人说过话就别抢话（避免「环境自发」变成连续剧）
+        # 群里刚有人说过话就别抢话（避免「环境自发」变成连续剧）。
+        # ★ 这道守卫必须跟着可调间隔走：用户把「群自己起话头的最小间隔」
+        #   调到 1 分钟时，写死的 90 秒会把它永远挡住（等于调了没生效）。
+        guard = min(90.0, max(15.0, float(self.gcfg.ambient_gap_lo or 8) * 60.0 * 0.6))
         rows = self.store.recent_gmsgs(1, include_revoked=False)
-        if rows and now - float(rows[-1].get("ts") or 0) < 90:
+        if rows and now - float(rows[-1].get("ts") or 0) < guard:
             return None
 
         # ① 先掷骰子：这次是「抖一段私聊进群」吗（用户要的转发/分享）
@@ -1601,7 +1604,8 @@ class GroupRuntime:
 
     async def run(self) -> None:
         """群自己的节奏循环。"""
-        await asyncio.sleep(random.uniform(30.0, 120.0))
+        # 首轮别等太久：原来的 30~120 秒在「最小间隔 1 分钟」的设置下显得很拖
+        await asyncio.sleep(random.uniform(10.0, 40.0))
         while not self._stop.is_set():
             try:
                 await self.tick_once()

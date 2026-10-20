@@ -559,7 +559,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         round_gap_reset_min=int(_get(raw, "group", "round_gap_reset_min", default=6)),
         msgs_per_hour=int(_get(raw, "group", "msgs_per_hour", default=18)),
         msgs_per_hour_burst=int(_get(raw, "group", "msgs_per_hour_burst", default=5)),
-        daily_max_total=int(_get(raw, "group", "daily_max_total", default=120)),
+        daily_max_total=int(_get(raw, "group", "daily_max_total", default=600)),
         daily_max_per_member=int(_get(raw, "group", "daily_max_per_member", default=10)),
         min_gap_member_sec=int(_get(raw, "group", "min_gap_member_sec", default=20)),
         bubbles_per_turn=int(_get(raw, "group", "bubbles_per_turn", default=2)),

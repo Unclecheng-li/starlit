@@ -2681,7 +2681,25 @@ html[data-theme="dark"] .group-avatar {
   background: rgba(130, 147, 170, .1);
 }
 
-.at-chip { color: var(--brand); background: var(--brand-soft); font-weight: 600; }
+/* @ 芯片：QQ 里 @ 就是一段高亮文字，**不带底色块**。
+   原来的 brand-soft 底 + padding 在我的蓝色气泡里会变成一块深色补丁，
+   看起来像气泡左边多了一段空白（用户实测截图）。
+   ⚠️ 必须用 `.bubble .at-chip` 提高特异性 —— `.bubble .face-chip` 的底色
+   会把它压过去（不加选择器前缀的话这里根本生效不了）。 */
+.bubble .at-chip,
+.bubble .face-chip.at-chip {
+  display: inline;
+  color: var(--brand);
+  background: transparent;
+  padding: 0;
+  min-width: 0;
+  margin: 0;
+  height: auto;
+  font-weight: 600;
+  vertical-align: baseline;
+}
+.bubble .at-chip:hover { background: transparent; }
+.msg-row.out .bubble .at-chip { color: inherit; }
 
 /* ---------- 群右侧面板（群公告 + 群聊成员） ---------- */
 .group-side {

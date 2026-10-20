@@ -2228,7 +2228,19 @@
       const d = seg.data || {};
       if (seg.type === 'text') {
         const raw = String(d.text || '');
-        if (raw) appendTextWithLinks(bubble, raw);
+        // ★ 文本里以「@某人 」开头的，前面已经画过 at 芯片了 —— 从这里削掉，
+        //   否则会重复一遍（用户实测：气泡左边一块暗色芯片 + 又写一遍名字）
+        let body = raw;
+        const prev = bubble.lastElementChild;
+        if (body && prev && prev.classList
+            && prev.classList.contains('at-chip')) {
+          // ★ 不依赖芯片的显示名（成员列表没加载时 atLabel 会退化成「@QQ号」，
+          //   名字对不上就削不掉）—— 前面已经画过一个 at 芯片，这里把紧随其后的
+          //   「@某某 」整段丢掉即可。
+          body = body.replace(/^\s*@[^\s@]+[\s\u3000]*/, '');
+          if (!body.trim() && raw.trim()) body = '';   // 只 @ 人没文字 → 什么都不留
+        }
+        if (body) appendTextWithLinks(bubble, body);
       } else if (seg.type === 'image' || seg.type === 'mface' || seg.type === 'marketface') {
         const url = imageUrlOf(seg);
         if (url) {
@@ -3977,12 +3989,24 @@
   }
 
   // 发送时把待发的 at 段拼到最前面（后端靠 at 段判断「@ 了谁」）
+  // ★ 必须把输入框里那段「@名字 」剥掉：atMember/atAll 往输入框插的是纯文本
+  //   「@橘雪莉 」，如果再原样留在 text 段里，气泡上就会出现**两遍**——
+  //   一个 at 芯片 + 文本里的「@橘雪莉」（用户实测：气泡左边一块像空白的
+  //   暗色芯片，后面又重复一遍名字）。
   function composeSegs(text) {
     const segs = [];
+    let rest = String(text || '');
     for (const m of state.pendingMentions) {
       segs.push({ type: 'at', data: { qq: m.id === 'all' ? 'all' : Number(m.id) } });
+      const label = '@' + String(m.name || m.id);
+      const i = rest.indexOf(label);
+      if (i >= 0) {
+        rest = (rest.slice(0, i) + rest.slice(i + label.length)).replace(/^\s+/, '');
+      }
     }
-    segs.push({ type: 'text', data: { text: text || '' } });
+    // 只 @ 了人、一个字没说：保留原文，否则后端会当成空消息整条丢掉
+    const body = rest.trim() ? rest : String(text || '');
+    segs.push({ type: 'text', data: { text: body } });
     return segs;
   }
 

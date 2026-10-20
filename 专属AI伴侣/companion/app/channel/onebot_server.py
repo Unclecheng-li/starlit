@@ -817,6 +817,30 @@ class OneBotServerChannel:
                 if camel in data:
                     data.setdefault(snake, data.pop(camel))
             out.append({"type": t, "data": data})
+        return OneBotServerChannel._dedupe_at_text(out)
+
+    @staticmethod
+    def _dedupe_at_text(segments: List[Any]) -> List[Any]:
+        """削掉「紧跟 at 段之后」那个重复的「@某人 」。
+
+        ★ 客户端 @ 人时会把「@某人 」**同时**写进 at 段和 text 段（输入框里
+        插的是纯文本，at 段是发送时另加的）。服务端原样存下来，气泡上就出现
+        **两遍** —— 一个 at 芯片 + 文本里又写一遍「@橘雪莉」（用户实测截图：
+        看起来像气泡左边多了一段带底色的空白块）。
+        在入口削掉，历史回放/多端同步拿到的都是干净的段。
+        """
+        out: List[Any] = []
+        for seg in (segments or []):
+            if (isinstance(seg, dict) and seg.get("type") == "text"
+                    and out and isinstance(out[-1], dict)
+                    and out[-1].get("type") == "at"):
+                d = dict(seg.get("data") or {})
+                t = str(d.get("text") or "")
+                stripped = re.sub(r"^\s*@[^\s@]+[\s\u3000]*", "", t)
+                if stripped != t:
+                    d["text"] = stripped
+                    seg = {"type": "text", "data": d}
+            out.append(seg)
         return out
 
     async def _emit_event(self, event: Dict[str, Any]) -> None:
