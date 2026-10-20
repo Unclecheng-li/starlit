@@ -236,6 +236,13 @@ class AutonomyConfig:
     silence_growth: float = 1.2    # 每多一轮静默，时长乘这个系数
     silence_max_min: int = 60      # 静默时长的上限（1 小时）
     # 静默期满后，回来第一句是「关心状态」而不是继续分享
+    # ── 你没空回消息时的「自动宽限」─────────────────────────
+    # 你忙起来一整天没回，她的焦虑/孤独/委屈会一路涨到爆（实测有角色焦虑 90、
+    # 效价 -60）。真人不会因为对方上班没回就崩溃 —— 所以：距你上次说话超过
+    # 这么多分钟，就当她理解成「他在忙」，**暂停**负面情绪的增长；你一开口
+    # 立刻恢复正常（该撒娇撒娇、该委屈委屈）。0 = 关闭这条宽限。
+    busy_grace_min: int = 45
+
     checkin_kinds: List[str] = field(
         default_factory=lambda: ["miss", "mood", "miss", "miss"])
 
@@ -544,6 +551,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         silence_min=int(_get(raw, "autonomy", "silence_min", default=25)),
         silence_growth=float(_get(raw, "autonomy", "silence_growth", default=1.2)),
         silence_max_min=int(_get(raw, "autonomy", "silence_max_min", default=60)),
+        busy_grace_min=int(_get(raw, "autonomy", "busy_grace_min", default=45)),
         checkin_kinds=[str(x) for x in (_get(raw, "autonomy", "checkin_kinds",
                                              default=["miss", "mood", "miss", "miss"]) or [])],
         digest_enabled=bool(_get(raw, "autonomy", "digest_enabled", default=True)),

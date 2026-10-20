@@ -343,8 +343,18 @@ class Heartbeat:
     def stop(self) -> None:
         self._stop.set()
 
-    async def _wake(self) -> None:
-        # 推进状态：静默时段算休息，电量恢复
+    def is_busy(self, gap_h: Optional[float]) -> bool:
+        """距你上次说话这么久 → 当她理解成「你在忙」。
+
+        忙碌期内**暂停**焦虑/孤独/委屈的增长（不是清空，只是不再叠加）：
+        真人不会因为对方上班没回就崩溃。你一开口 `_pipeline` 会把
+        unanswered_h=0 传进来，情绪立刻恢复正常的互动节奏。
+        """
+        grace = max(0.0, float(getattr(self.cfg, "busy_grace_min", 45) or 0)) / 60.0
+        return bool(grace > 0 and gap_h is not None and gap_h >= grace)
+
+    def _advance_state(self) -> None:
+        """按经过的时间推进情绪/电量（抽出来便于测试）。"""
         quiet = self.suppressor.in_quiet_hours()
         gap_h = (time.time() - self.last_reply_ts) / 3600.0 if self.last_reply_ts else None
         # ★ 长时间没互动也算「她在自己过日子」—— 电量要回一点。
@@ -353,10 +363,17 @@ class Heartbeat:
         #   越不主动越没电、越没电越不主动（实测：星野电量 0，晚上一声不吭）。
         idle_rest = gap_h is None or gap_h >= 1.5
         resting = quiet or idle_rest
+        busy = self.is_busy(gap_h)
+        if busy:
+            print(f"[heartbeat] 你在忙（{gap_h:.1f} 小时没说话）→ 暂停情绪消耗")
         # ★ 把「我发出去的消息多久没人回」交给情绪状态机 —— 等得越久，
         #   越担心/沮丧/难过、越藏不住想被回应的需求感（describe 会写出来）。
+        #   但「你在忙」时不推进（unanswered_h=None = 不增不减）。
         self.state.tick(last_interaction_ago_h=gap_h, resting=resting,
-                        unanswered_h=self.state.waiting_hours())
+                        unanswered_h=(None if busy else self.state.waiting_hours()))
+
+    async def _wake(self) -> None:
+        self._advance_state()
 
         # 顺带跑一次自主浏览（内部自带频率限制）
         share: Optional[ShareItem] = None

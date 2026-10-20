@@ -2182,6 +2182,35 @@ def test_topic_lock_fixes() -> None:
           "不要再提" in hint or "换个话题" in hint, hint[:40])
     st3.counter_set("last_reply_ts", time.time())      # 对方回话了
     check("对方回过话后不再算卡住", hb._stuck_topic_hint(turns)[1] == "", "")
+
+    # ★ 自动宽限：你忙起来没空回 → 暂停情绪消耗（不涨焦虑/孤独/委屈）
+    check("距上次说话 10 分钟 → 不算忙", hb.is_busy(10 / 60.0) is False, "")
+    check("距上次说话 1 小时 → 当她理解成「你在忙」",
+          hb.is_busy(1.0) is True, "")
+    check("从没聊过（gap=None）不算忙", hb.is_busy(None) is False, "")
+
+    # 忙碌期内焦虑不继续上涨
+    sm3.emotion.anxiety = 40.0
+    sm3.emotion.loneliness = 30.0
+    sm3.emotion.neglect = 20.0
+    sm3.emotion.updated_at = time.time() - 3600      # 模拟过了一小时
+    sm3.save()
+    st3.counter_set("last_reply_ts", time.time() - 7200)   # 你两小时没说话
+    st3.counter_set("last_spoke_ts", time.time() - 7200)
+    hb._advance_state()
+    check("★ 忙碌期内焦虑不涨（自动宽限生效）",
+          sm3.emotion.anxiety <= 40.5, str(sm3.emotion.anxiety))
+    check("★ 忙碌期内孤独不涨",
+          sm3.emotion.loneliness <= 30.5, str(sm3.emotion.loneliness))
+
+    # 非忙碌期（你 10 分钟前说过话）→ 状态机照常推进（电量照常消耗）
+    sm3.emotion.energy = 60.0
+    sm3.emotion.updated_at = time.time() - 3600
+    sm3.save()
+    st3.counter_set("last_reply_ts", time.time() - 600)
+    hb._advance_state()
+    check("非忙碌期状态机照常推进（电量按普通节奏消耗）",
+          sm3.emotion.energy < 60.0, str(sm3.emotion.energy))
     st3.close()
 
 
