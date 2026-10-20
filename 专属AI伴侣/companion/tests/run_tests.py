@@ -3563,6 +3563,20 @@ async def test_group_files_and_quote() -> None:
         rows_mids = {str(r.get("mid")) for r in rt.store.recent_gmsgs(40)}
         check("这些 mid 在群库里都查得到（引用才解析得出来）",
               all(m.split("-")[0] in rows_mids for m in mids), str(mids[-3:]))
+
+        # 推送环节：库内 mid 必须被原样采用，不能又被换成随机序号
+        await ch_meta._push_bot_message(
+            [{"type": "text", "data": {"text": "x"}}], "x",
+            sender_id="3901000011", sender_name="古关忧",
+            group_id=gid, message_id="g119")
+        ev = ch_meta._offline_queue[-1]
+        check("实时群事件的 message_id 原样采用库内 mid",
+              str(ev.get("message_id")) == "g119", str(ev.get("message_id")))
+        check("（附带）没客户端时事件进离线队列，可被重放",
+              bool(ch_meta._offline_queue), "")
+        check("历史拆出的 gN-2 也能反解成同一条消息（helper）",
+              ch_meta._base_mid("g119-2") == "g119"
+              and ch_meta._base_mid("g119") == "g119", "")
         check("实时群消息带上了角色与群名片",
               meta["role"] == m_g["role"] and meta["card"] == m_g["nickname"],
               str(meta))
