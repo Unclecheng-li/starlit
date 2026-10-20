@@ -282,11 +282,16 @@ class Suppressor:
 
         prompt = (
             "下面是一条你刚刚写好、准备主动发出的消息草稿。\n"
-            "请结合最近的对话判断：这条现在发出去还成立吗？\n\n"
+            "请结合最近的对话判断：这条现在发出去**是否明显有问题**？\n\n"
             f"最近的对话：\n{chr(10).join(recent[-6:]) if recent else '（无）'}\n\n"
             f"草稿：\n{draft}\n\n"
-            '只输出 JSON：{"send": true/false, "reason": "一句话"}。'
-            "如果草稿里提到的事情已经过期、已经被聊过、或者显得突兀，就 send=false。"
+            '只输出 JSON：{"send": true/false, "reason": "一句话"}。\n'
+            "★ 默认放行（send=true）。**只有**下面三种情况才 send=false：\n"
+            "  1) 和最近对话里的内容明显重复（同一件事刚说过）；\n"
+            "  2) 提到的事情已经明确过期、或时态明显不对（例如把还没发生的事当成已发生）；\n"
+            "  3) 内容会伤害对方（嘲讽、指责、翻旧账）。\n"
+            "⚠️ 「可能有点突兀」「话题跳了一下」「对方还没回上一句」都**不算**理由——"
+            "真人主动找人的时候本来就经常突然想起一件别的事。"
         )
         try:
             res = await self.llm.chat_json(
@@ -294,4 +299,9 @@ class Suppressor:
             )
             return bool(res.get("send")), str(res.get("reason", ""))
         except Exception as e:  # noqa: BLE001
-            return False, f"复核失败，保守放弃：{e}"
+            # ★ 复核失败要**放行**，不能「保守放弃」：模型偶尔输出非 JSON
+            #   就会把一条本来没问题的主动消息静默丢掉（日志里这种
+            #   「复核失败，保守放弃」出现过十几次，也是「她怎么不找我」的
+            #   一个成因）。宁可偶尔发得略显突兀，也不要一声不吭。
+            print(f"[suppress] 复核失败 → 放行：{e!r}")
+            return True, "复核不可用，放行"

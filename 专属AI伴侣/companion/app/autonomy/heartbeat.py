@@ -345,8 +345,14 @@ class Heartbeat:
 
     async def _wake(self) -> None:
         # 推进状态：静默时段算休息，电量恢复
-        resting = self.suppressor.in_quiet_hours()
+        quiet = self.suppressor.in_quiet_hours()
         gap_h = (time.time() - self.last_reply_ts) / 3600.0 if self.last_reply_ts else None
+        # ★ 长时间没互动也算「她在自己过日子」—— 电量要回一点。
+        #   原来只有免打扰时段才 +8/小时，其余时间一律 -1.5/小时：
+        #   连续几天没人聊就掉到 0，然后被第④层「电量低于 30」永久拦死，
+        #   越不主动越没电、越没电越不主动（实测：星野电量 0，晚上一声不吭）。
+        idle_rest = gap_h is None or gap_h >= 1.5
+        resting = quiet or idle_rest
         # ★ 把「我发出去的消息多久没人回」交给情绪状态机 —— 等得越久，
         #   越担心/沮丧/难过、越藏不住想被回应的需求感（describe 会写出来）。
         self.state.tick(last_interaction_ago_h=gap_h, resting=resting,

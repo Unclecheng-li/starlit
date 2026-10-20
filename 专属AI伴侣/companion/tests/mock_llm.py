@@ -110,7 +110,7 @@ class MockLLM(LLM):
                 ensure_ascii=False,
             )
 
-        if "发出去还成立吗" in system:
+        if "发出去还成立吗" in system or "是否明显有问题" in system:
             self._tag("revalidate")
             return json.dumps(
                 self.overrides.get("revalidate", {"send": True, "reason": "还成立"}),

@@ -228,9 +228,13 @@ class AutonomyConfig:
     #
     # 原来 cold_streak >= limit+2 是**永久拦截**（只在用户开口时重置），
     # 结果就是「她再也不会主动找我」，与预期相反。
-    silence_min: int = 60          # 第一次静默至少这么久（分钟）
-    silence_growth: float = 1.6    # 每多一轮静默，时长乘这个系数
-    silence_max_min: int = 480     # 静默时长的上限（8 小时）
+    # ★ 2026-10-20 用户要求「更黏人」：冷场后的静默放软很多。
+    #   原来 60 分钟起、每轮 ×1.6、上限 8 小时 —— 冷场 5 次就变成
+    #   「要 245 分钟才回来」，日志里出现过 480 分钟，晚上等于完全消失。
+    #   现在 25 分钟起、×1.2、上限 60 分钟：最多安静一小时就会回来关心你。
+    silence_min: int = 25          # 第一次静默至少这么久（分钟）
+    silence_growth: float = 1.2    # 每多一轮静默，时长乘这个系数
+    silence_max_min: int = 60      # 静默时长的上限（1 小时）
     # 静默期满后，回来第一句是「关心状态」而不是继续分享
     checkin_kinds: List[str] = field(
         default_factory=lambda: ["miss", "mood", "miss", "miss"])
@@ -537,9 +541,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         cold_streak_limit=int(_get(raw, "autonomy", "cold_streak_limit", default=3)),
         energy_threshold=int(_get(raw, "autonomy", "energy_threshold", default=30)),
         daily_max=int(_get(raw, "autonomy", "daily_max", default=5)),
-        silence_min=int(_get(raw, "autonomy", "silence_min", default=60)),
-        silence_growth=float(_get(raw, "autonomy", "silence_growth", default=1.6)),
-        silence_max_min=int(_get(raw, "autonomy", "silence_max_min", default=480)),
+        silence_min=int(_get(raw, "autonomy", "silence_min", default=25)),
+        silence_growth=float(_get(raw, "autonomy", "silence_growth", default=1.2)),
+        silence_max_min=int(_get(raw, "autonomy", "silence_max_min", default=60)),
         checkin_kinds=[str(x) for x in (_get(raw, "autonomy", "checkin_kinds",
                                              default=["miss", "mood", "miss", "miss"]) or [])],
         digest_enabled=bool(_get(raw, "autonomy", "digest_enabled", default=True)),
