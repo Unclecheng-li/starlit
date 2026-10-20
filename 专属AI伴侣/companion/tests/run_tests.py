@@ -351,7 +351,8 @@ async def test_full_pipeline() -> None:
     check("画像已写入", "冰美式" in comp.memory.profile_text(),
           comp.memory.profile_text()[:80])
     check("情节记忆已写入", any("冰美式" in m["text"] for m in comp.store.all_memories()))
-    check("兴趣词已登记", "咖啡" in comp.memory.interests())
+    check("兴趣词已登记", "咖啡" in comp.memory.interests()
+          or "咖啡" in comp.memory.heard(), str(comp.memory.interests()))
     check("对话已落盘 transcript", len(comp.store.recent_turns(10)) == 2)
     check("last_analysis 已缓存（供 /why）", bool(comp.store.kv_get("last_analysis")))
 
@@ -2064,11 +2065,15 @@ def test_hygiene() -> None:
     mem = Memory(st, f)
     terms = mem.interests()
 
-    check("播种只取「兴趣」小节下的条目",
-          "深空天体" in terms and "网络安全攻防" in terms, str(list(terms)))
+    check("播种只取「她自己的兴趣」小节下的条目",
+          "深空天体" in terms, str(list(terms)))
+    check("★「用户的兴趣」不进自主浏览图谱（否则会去搜对方的行业垃圾页）",
+          "网络安全攻防" not in terms, str(list(terms)))
+    check("★「用户的兴趣」记进「听过」桶（可以接话，但不驱动浏览）",
+          "网络安全攻防" in mem.heard(), str(list(mem.heard())))
     check("配置段条目没被当成兴趣",
           not any(("频率" in k) or ("候选" in k) for k in terms), str(list(terms)))
-    check("播种数量正确（3 个）", len(terms) == 3, f"{len(terms)}: {list(terms)}")
+    check("播种数量正确（2 个）", len(terms) == 2, f"{len(terms)}: {list(terms)}")
     st.close()
 
     check("「中性/平淡」→ 中性", _norm_label("中性/平淡") == "中性")
@@ -2078,6 +2083,106 @@ def test_hygiene() -> None:
     check("未知词 → 中性", _norm_label("恍惚") == "中性")
     check("「有点难过吧」能提取出 难过", _norm_label("有点难过吧") == "难过")
     check("「焦虑、疲惫」取第一个", _norm_label("焦虑、疲惫") == "焦虑")
+
+
+# ---------------------------------------------------------------- 10b
+def test_topic_lock_fixes() -> None:
+    """话题锁死的三道刹车：兴趣图谱分离 / 召回去重 / 待发分享过期。
+
+    背景（用户实测）：星野抽中两张水族馆票之后，二十多条主动开口
+    全是「那两张票到几号来着」，整段聊天只剩「困、睡、水族馆、票」。
+    """
+    from app.memory import Memory
+
+    section("话题锁死刹车")
+
+    # ── ① 兴趣图谱：只有「她自己的兴趣」才进图谱 ──────────────
+    d = Path(tempfile.mkdtemp())
+    f = d / "interests.md"
+    f.write_text(
+        "# 兴趣\n\n"
+        "## 她自己的兴趣\n"
+        "- 鲸鱼 与 海洋生物\n\n"
+        "## 用户兴趣（不驱动自主浏览）\n"
+        "- 虚拟机\n"
+        "- 网络安全\n\n"
+        "## 自主浏览配置\n- 频率：每天 2 次\n",
+        encoding="utf-8",
+    )
+    st = Store(str(d / "i.db"))
+    mem = Memory(st, f)
+    check("播种：她的兴趣进图谱", "鲸鱼 与 海洋生物" in mem.interests())
+    mem.bump_interest("虚拟机", 5.0)
+    mem.bump_interest("鲸鱼", 2.0)
+    check("★ 对方的领域词不进自主浏览图谱",
+          "虚拟机" not in mem.interests(), str(list(mem.interests())))
+    check("★ 对方的领域词进「听过」桶", "虚拟机" in mem.heard(), "")
+    check("★ 落在她自己兴趣范围里的词才进图谱",
+          mem.interests().get("鲸鱼") == 2.0, str(mem.interests()))
+    check("单字不算兴趣词（「睡」「票」这种）", mem.bump_interest("票") is None
+          and "票" not in mem.interests() and "票" not in mem.heard(), "")
+    check("功能词直接丢弃（表情包）",
+          mem.bump_interest("表情包") is None and "表情包" not in mem.heard(), "")
+
+    # 自愈：图谱被灌脏后，重启一遍应清掉不属于她的词
+    st.kv_set("interest_terms", {"虚拟机": 6.0, "鲸鱼 与 海洋生物": 1.0})
+    Memory(st, f)
+    check("★ 启动自愈：清掉被灌进图谱的杂词",
+          "虚拟机" not in mem.interests(), str(list(mem.interests())))
+    # 空白片段不能造成误命中：「 与」曾经让「AI 与模型进展」赖在图谱里不走
+    st.kv_set("interest_terms", {"AI 与模型进展": 6.0, "鲸鱼 与 海洋生物": 1.0})
+    Memory(st, f)
+    check("★「空格+单字」的片段不算命中（「 与」的坑）",
+          "AI 与模型进展" not in mem.interests(), str(list(mem.interests())))
+    st.close()
+
+    # ── ② 召回去重（MMR）：同一件事的近义记忆不能占满名额 ──────
+    st2 = Store(str(d / "r.db"))
+    mem2 = Memory(st2)
+    for _ in range(5):
+        mem2.add_semantic("那两张水族馆的票还在抽屉里，一直没去")
+    mem2.add_semantic("今天在面馆吃了碗牛肉面，汤都喝干净了")
+    hits = mem2.recall("水族馆 票", top_k=3)
+    texts = [h["text"] for h in hits]
+    check("★ 召回做了去重：同一件事记了 5 遍也只占 1 个名额",
+          len(texts) == len(set(texts)), str(texts))
+    check("召回的条目数正常", len(hits) == 2, str(len(hits)))
+    st2.close()
+
+    # ── ③ 待发分享搁置太久 → 丢掉重搜（否则浏览被死锁）────────
+    from app.autonomy.digest import Digest, _age_hours, STALE_PENDING_HOURS
+    check("搁置时长可算出（12 小时内）", 0 < _age_hours(
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3600)))
+        < 2, "")
+    check("时间戳坏掉时返回 None（不崩）", _age_hours("不是时间") is None, "")
+    check("搁置阈值是 12 小时", STALE_PENDING_HOURS == 12.0, "")
+
+    # ── ④ 「同一件事问到底」的刹车 ──────────────────────────
+    from app.autonomy.heartbeat import Heartbeat
+    from app.autonomy.search import NullProvider
+    from app.autonomy.suppress import Suppressor
+    from app.config import QQConfig
+    from app.state import StateMachine as _SM
+
+    cfg = tmpcfg()
+    st3 = Store(str(d / "h.db"))
+    mem3 = Memory(st3)
+    sm3 = _SM(st3)
+    sup = Suppressor(cfg.autonomy, st3, MockLLM(), sm3, mem3)
+    dig = Digest(cfg.autonomy, cfg.memory, MockLLM(), mem3, sm3, st3, NullProvider())
+    hb = Heartbeat(cfg.autonomy, QQConfig(self_id="1", owner_id="2"), st3,
+                   MockLLM(), sm3, mem3, sup, None, dig, lambda n: "")
+    # 她「连着主动开口、对方一条没回」
+    st3.counter_set("last_reply_ts", time.time() - 7200)
+    st3.counter_set("last_spoke_ts", time.time() - 600)
+    turns = [{"role": "assistant", "text": "那两张水族馆的票到几号来着"}] * 3
+    terms, hint = hb._stuck_topic_hint(turns)
+    check("★ 卡住时能识别出反复提的词", bool(terms), str(terms))
+    check("★ 卡住时会给出「换话题」提示",
+          "不要再提" in hint or "换个话题" in hint, hint[:40])
+    st3.counter_set("last_reply_ts", time.time())      # 对方回话了
+    check("对方回过话后不再算卡住", hb._stuck_topic_hint(turns)[1] == "", "")
+    st3.close()
 
 
 # ---------------------------------------------------------------- 10
@@ -3760,6 +3865,7 @@ async def main() -> int:
     await test_group_files_and_quote()
     await test_history_recall_and_split()
     test_hygiene()
+    test_topic_lock_fixes()
     test_sticker_offline()
     await test_onebot_server()
 

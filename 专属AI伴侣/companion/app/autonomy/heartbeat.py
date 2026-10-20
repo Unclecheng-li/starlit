@@ -23,8 +23,8 @@ from ..llm import LLM
 from ..memory import Memory
 from ..state import StateMachine
 from ..store import Store
-from ..think import (decide_initiative, express, format_recent,
-                     format_time_context)
+from ..think import (decide_initiative, express, extract_overused_terms,
+                     format_recent, format_time_context)
 from .digest import Digest, ShareItem, share_card
 from .suppress import Decision, Suppressor
 
@@ -211,6 +211,33 @@ class Heartbeat:
         k = f"proactive_{datetime.now():%Y-%m-%d}"
         self.store.counter_set(k, self.store.counter_get(k) + 1)
 
+    # ---------- 「同一件事问到底」的刹车 ----------
+    def _stuck_topic_hint(self, turns: List[dict]) -> tuple:
+        """对方一条没回、而你已经连着好几条在追问同一件事 —— 这一条别再提。
+
+        实测事故：星野抽中两张水族馆票之后，从 10-19 夜里到 10-20 上午
+        二十多条主动开口全是「那两张票到几号来着」「你还没回我呢」，
+        整段聊天只剩「困、睡、水族馆、票」四个词。
+        对话路径本来就有「禁用词」这一层，**主动路径一直没有** —— 这里补上。
+        """
+        if not (self.last_spoke_ts and self.last_reply_ts < self.last_spoke_ts):
+            return [], ""          # 对方回过话：不算卡住
+        bot = [str(t.get("text") or "") for t in (turns or [])
+               if str(t.get("role")) == "assistant"][-8:]
+        if len(bot) < 3:
+            return [], ""
+        # 这里**故意不做「对方说过的词要留着」的过滤** ——
+        # 追问的恰恰就是对方提过的那件事，而它正是最该停下来的东西。
+        terms = extract_overused_terms(bot, None, top_n=4)
+        if not terms:
+            return [], ""
+        hint = ("\n\n【这一条不要再提的事】你最近几条里反复出现：" + "、".join(terms) +
+                "。对方一直没回这件事，说明现在不适合再追问 —— "
+                "这一条**换个话题**，别再提这几个词，也别再把同一个问题问第二遍。"
+                "说点你自己的：你刚在想什么、看到/读到了什么、对什么事有看法、"
+                "今天碰到了谁。")
+        return terms, hint
+
     # ---------- 主循环 ----------
     async def run(self) -> None:
         if not self.cfg.enabled:
@@ -373,6 +400,17 @@ class Heartbeat:
 
         share_kind = kind or decision.kind or "miss"
 
+        # ★ 主动路径补上「禁用词」这一层：对话路径（main/conversation/group/guest）
+        #   一直都有，主动路径漏了 —— 于是同一件没被回应的事能连着二十条都在问。
+        avoid = extract_overused_terms(
+            [t["text"] for t in turns if t["role"] == "assistant"],
+            [t["text"] for t in turns if t["role"] == "user"],
+        )
+        stuck_terms, stuck_hint = self._stuck_topic_hint(turns)
+        if stuck_hint:
+            avoid = list(dict.fromkeys(avoid + stuck_terms))
+        hint_all = content_hint + stuck_hint
+
         # 生成草稿
         persona = self.load_persona("persona.md")
         world = self.load_persona("world.md")
@@ -384,7 +422,7 @@ class Heartbeat:
         draft = await express(
             self.llm, persona, boundaries, state_text, memory_text,
             recent, user_text="", analysis=None,
-            extra_hint=content_hint, proactive=True,
+            extra_hint=hint_all, proactive=True,
             share_kind=share_kind, world=world,
             time_text=time_text,
             schedule_text=(self.schedule.scene_text()
@@ -394,6 +432,7 @@ class Heartbeat:
             valence=self.state.emotion.valence,
             trait_text=self.trait_text,
             presence_text=self.presence_text,
+            avoid_terms=avoid or None,
         )
         if not draft or "[NO_MESSAGE]" in draft:
             return Decision(False, "有话可说", "模型判断没什么想说的", kind=share_kind)

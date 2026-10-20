@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 from ..config import AutonomyConfig, MemoryConfig
 from ..llm import LLM
-from ..memory import Memory, cosine, embed
+from ..memory import FUNCTIONAL_INTERESTS, Memory, cosine, embed
 from ..store import Store
 from ..state import StateMachine
 from .search import NotConfigured, SearchProvider, SearchResponseError
@@ -34,6 +34,19 @@ from .search import NotConfigured, SearchProvider, SearchResponseError
 # 原来的硬编码 0.55 / 每天 1 次太保守 —— 实测从来没分享成功过。
 DEFAULT_SHARE_SCORE_THRESHOLD = 0.42
 DEFAULT_DAILY_SHARE_MAX = 3
+
+# 待发分享搁置超过这个小时数就丢掉重搜 —— 超过它基本可以断定已经死锁
+# （心跳照常把它交给抑制链，抑制链每次都拦，于是永远发不出去、也永远不再搜新的）。
+STALE_PENDING_HOURS = 12.0
+
+
+def _age_hours(ts: Any) -> Optional[float]:
+    """把 digest_pending 里那个 "YYYY-MM-DD HH:MM:SS" 算成「搁置了多少小时」。"""
+    try:
+        t = time.mktime(time.strptime(str(ts), "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return (time.time() - t) / 3600.0
 
 EXTRACT_SYSTEM = """从这段内容里抽取 3~6 个关键词（中文优先），用于判断它和谁的兴趣相关。
 只输出 JSON：{"keywords": ["...", "..."]}"""
@@ -46,9 +59,8 @@ SPAM_PAT = re.compile(
     r"(下载|安装包|apk|正版|破解|大全|素材|壁纸|官网|网盘|免费|"
     r"3dm|87g|17173|游民|百科|词条)", re.IGNORECASE)
 
-# 功能词：聊天里抽出来的 vol 日常用词，不是对方的真实兴趣 ——
-# 拿它们去搜只会搜出「表情包大全下载」这种垃圾页
-FUNCTIONAL_INTERESTS = {"表情包", "表情", "图片", "截图", "二维码", "语音", "翻译"}
+# 功能词（「表情包」「图片」这类）在 memory.FUNCTIONAL_INTERESTS 里统一定义，
+# 两边共用一份 —— 拿它们去搜只会搜出「表情包大全下载」这种垃圾页。
 
 SHARE_JUDGE_SYSTEM = """你是内容把关人。判断哪条搜索结果最值得分享给一位喜欢「{topics}」的朋友。
 只输出 JSON：{"index": 序号(从1开始), "score": 1~10, "angle": "一句话：这条有意思在哪、值得聊在哪"}
@@ -143,17 +155,28 @@ class Digest:
         # 结果一条都发不出去。
         pending = self.store.kv_get("digest_pending") or {}
         if pending.get("url"):
-            if self._today_shared() >= self._daily_max:
+            age_h = _age_hours(pending.get("ts"))
+            if age_h is not None and age_h > STALE_PENDING_HOURS:
+                # ★ 搁置太久 = 已经死锁：心跳每次都把它交给抑制链，
+                #   抑制链每次都拦（「这事已经聊过/不成立」），于是它永远
+                #   发不出去，而 run_once 每次都直接返回它 —— 自主浏览
+                #   再也不会搜新的。实测星野那条「QQ表情包大全」待发项
+                #   从 10-16 卡到 10-20，四天没搜过任何新东西。
+                print(f"[digest] 待发分享搁置了 {age_h:.0f} 小时发不出去，"
+                      f"丢弃它、重新搜")
+                self.store.kv_set("digest_pending", None)
+            elif self._today_shared() >= self._daily_max:
                 return None
-            print(f"[digest] 用上次未发出的分享（{pending.get('ts')}）："
-                  f"{str(pending.get('text'))[:40]}…")
-            return ShareItem(text=str(pending.get("text") or ""),
-                             url=str(pending.get("url") or ""),
-                             score=float(pending.get("score") or 0.0),
-                             topic=str(pending.get("topic") or ""),
-                             angle=str(pending.get("angle") or ""),
-                             title=str(pending.get("title") or ""),
-                             desc=str(pending.get("desc") or ""))
+            else:
+                print(f"[digest] 用上次未发出的分享（{pending.get('ts')}）："
+                      f"{str(pending.get('text'))[:40]}…")
+                return ShareItem(text=str(pending.get("text") or ""),
+                                 url=str(pending.get("url") or ""),
+                                 score=float(pending.get("score") or 0.0),
+                                 topic=str(pending.get("topic") or ""),
+                                 angle=str(pending.get("angle") or ""),
+                                 title=str(pending.get("title") or ""),
+                                 desc=str(pending.get("desc") or ""))
 
         if self._today_shared() >= self._daily_max:
             print(f"[digest] 今日分享已达上限 {self._daily_max} 次，只静默学习")
