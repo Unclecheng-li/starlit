@@ -1622,6 +1622,39 @@
     } catch (e) { return null; }
   }
 
+  // 合并转发（forward）段里内嵌的聊天记录：OneBot 把每条放在 data.content 里。
+  // 有的实现只给 data.id（要再调 get_forward_msg 才拿得到），那种就只能退回提示。
+  function forwardItemsOf(seg) {
+    const d = (seg && seg.data) || {};
+    const raw = d.content || d.messages || [];
+    let list = raw;
+    if (typeof raw === 'string') {
+      try { list = JSON.parse(raw); } catch (e) { list = []; }
+    }
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const it of list) {
+      if (!it || typeof it !== 'object') continue;
+      const sender = it.sender || it.user_name || it.nickname || {};
+      const name = typeof sender === 'string' ? sender
+        : String(sender.card || sender.nickname || it.nickname || '某人');
+      const body = it.content || it.message || it.text || '';
+      let text = '';
+      if (typeof body === 'string') text = body;
+      else if (Array.isArray(body)) {
+        text = body.map((s) => {
+          if (!s || typeof s !== 'object') return '';
+          if (s.type === 'text') return String((s.data || {}).text || '');
+          if (s.type === 'image' || s.type === 'mface') return '[图片]';
+          if (s.type === 'record') return '[语音]';
+          return '';
+        }).join('');
+      }
+      if (text) out.push({ name, text: text.replace(/\s+/g, ' ').slice(0, 60) });
+    }
+    return out;
+  }
+
   function makeShareCard(card) {
     const box = document.createElement('a');
     box.className = 'share-card';
@@ -2168,22 +2201,55 @@
         chip.textContent = '语音';
         bubble.appendChild(chip);
       } else if (seg.type === 'json') {
-        // 「甩分享」卡片：解析得出来就画卡片，否则退回聊天记录提示
+        // 「甩分享」卡片：解析得出来就画卡片。
+        // ⚠️ 解析不出来时**不要**画「[聊天记录]」—— 那四个字对一条分享毫无
+        // 信息量（用户实测：只看到「[聊天记录]」，完全不知道她发了什么）。
+        // 退路优先取出里面能读的文字（标题/摘要/链接），实在没有才提示。
         const card = parseShareCard(seg);
         if (card) {
           if (bubble.childNodes.length) bubble.appendChild(document.createElement('br'));
           bubble.appendChild(makeShareCard(card));
+        } else {
+          const raw = String((seg.data && seg.data.data) || '');
+          const chip = document.createElement('span');
+          chip.className = 'face-chip';
+          chip.textContent = raw
+            ? ('[分享] ' + raw.replace(/[{}\[\]"]/g, ' ').trim().slice(0, 40))
+            : '[分享]';
+          bubble.appendChild(chip);
+        }
+      } else if (seg.type === 'forward') {
+        // 合并转发：有内嵌内容就把每一条画出来（QQ 也是展开成列表），
+        // 只有 id、内容没带过来时才退回提示。
+        const items = forwardItemsOf(seg);
+        if (items.length) {
+          const box = document.createElement('div');
+          box.className = 'fwd-box';
+          const head = document.createElement('div');
+          head.className = 'fwd-head';
+          head.textContent = String((seg.data && (seg.data.title || seg.data.summary))
+                                    || '聊天记录');
+          box.appendChild(head);
+          for (const it of items.slice(0, 20)) {
+            const line = document.createElement('div');
+            line.className = 'fwd-line';
+            const who = document.createElement('span');
+            who.className = 'fwd-who';
+            who.textContent = it.name;
+            const tx = document.createElement('span');
+            tx.className = 'fwd-text';
+            tx.textContent = it.text;
+            line.append(who, tx);
+            box.appendChild(line);
+          }
+          if (bubble.childNodes.length) bubble.appendChild(document.createElement('br'));
+          bubble.appendChild(box);
         } else {
           const chip = document.createElement('span');
           chip.className = 'face-chip';
           chip.textContent = '[聊天记录]';
           bubble.appendChild(chip);
         }
-      } else if (seg.type === 'forward') {
-        const chip = document.createElement('span');
-        chip.className = 'face-chip';
-        chip.textContent = '[聊天记录]';
-        bubble.appendChild(chip);
       }
     }
     if (!bubble.childNodes.length) bubble.textContent = msg.text || '[消息]';

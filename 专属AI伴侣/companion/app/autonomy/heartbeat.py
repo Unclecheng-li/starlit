@@ -37,6 +37,20 @@ def fmt_minutes(m: float) -> str:
     return f"{m / 1440:.1f} 天"
 
 
+def stored_turn_text(draft: str, share: Optional[ShareItem] = None) -> str:
+    """写进 transcript 的那段文本。
+
+    ★ 分享卡片不进私聊历史（历史只有文本），重开窗口那张卡片就没了 ——
+    于是「她分享的那条新闻」永远找不回来。把链接一并留下，前端会把 URL
+    渲染成可点链接，等于给了一个可回溯的「原文入口」。
+    """
+    text = str(draft or "")[:400]
+    url = str(getattr(share, "url", "") or "") if share else ""
+    if url and url not in text:
+        text = f"{text}\n{url}"
+    return text
+
+
 class ProactiveRhythm:
     """决定「下一次大概什么时候来找你」。
 
@@ -406,7 +420,8 @@ class Heartbeat:
         await self.sender.reply(draft, **send_kwargs)
         self.store.counter_set("last_spoke_ts", time.time())
         self._bump_today()
-        self.store.add_turn("assistant", draft[:400])
+        # 分享的链接一并写进历史（卡片本身不进 transcript，见 stored_turn_text）
+        self.store.add_turn("assistant", stored_turn_text(draft, share))
         self.store.add_event(f"主动开口[{share_kind}]：{draft[:80]}", kind="proactive")
 
         # 冷场统计：上次说话后有没有收到回复

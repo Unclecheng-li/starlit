@@ -2859,6 +2859,18 @@ async def test_schedule_and_share_card() -> None:
     check("没链接时不产卡片（退回纯文本气泡）",
           share_card(ShareItem(text="t", url="", score=1, topic="x")) == {}, "")
 
+    # 卡片不进私聊历史（历史只有文本），所以链接必须一并写进 transcript ——
+    # 否则重开窗口就再也找不回她分享的那条内容。
+    from app.autonomy.heartbeat import stored_turn_text
+
+    one_line = stored_turn_text("老师早上好，爱丽丝看到一个新闻", item)
+    check("分享的链接会写进历史（重开窗口还找得到原文）",
+          "https://example.com/a" in one_line, one_line)
+    check("没有分享时历史就是原文本",
+          stored_turn_text("普通一句", None) == "普通一句", "")
+    check("文本里已经有链接就不重复追加",
+          stored_turn_text(f"看这个 {item.url}", item).count(item.url) == 1, "")
+
     # ── 卡片真的走到了通道（不是构出来就丢了）──────────────────
     from app.act import Sender
     from app.channel.console import ConsoleChannel
