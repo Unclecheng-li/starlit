@@ -440,6 +440,20 @@ class Companion:
         """★ 群 id 绝不能走 `store_for`（它对未知 peer 会回落到主人格的库）。"""
         return self.groups.store_for(gid)
 
+    def group_quoted(self, gid: str, mid: str) -> Optional[dict]:
+        """给通道用：按 mid 取群里被引用那条消息的「昵称 + 摘要」。
+
+        通道保留的 `find_gmsg(库内 mid)` 查不到「我那条消息的实时随机 id」——
+        而群引擎有对照表，这里借它把引用块补齐。
+        """
+        rt = self._group_runtimes.get(str(gid or ""))
+        if rt is None:
+            return None
+        try:
+            return rt.quoted_of(str(mid or ""))
+        except Exception:  # noqa: BLE001
+            return None
+
     @staticmethod
     def _schedule_text_for(char) -> str:
         """角色的作息提示词（没配作息、或正在清醒时段 → 空串）。"""
@@ -1459,19 +1473,41 @@ class Companion:
         return head
 
     @staticmethod
-    def _store_user_turns(store: Store, msg: IncomingMessage) -> None:
-        """把用户消息按原始分条写进历史（合并只影响理解，不影响回放）。"""
+    def _store_user_turns(store: Store, msg: IncomingMessage,
+                          reply_mid: str = "") -> None:
+        """把用户消息按原始分条写进历史（合并只影响理解，不影响回放）。
+
+        `reply_mid`：这条消息「引用回复」的是哪一条 —— 记下来，重新打开
+        会话/多端同步时才画得出引用块（只存纯文本的话，刷新一次引用就没了）。
+        """
         raw = msg.raw or {}
         texts = raw.get("_merged_texts")
         times = raw.get("_merged_times")
         if isinstance(texts, list) and texts:
+            last_tid = 0
             for i, t in enumerate(texts):
                 ts = None
                 if isinstance(times, list) and i < len(times):
                     ts = float(times[i] or 0) or None
-                store.add_turn("user", str(t)[:400], ts=ts)
+                last_tid = store.add_turn("user", str(t)[:400], ts=ts)
+            if reply_mid and last_tid:      # 引用挂在最后一条上
+                store.set_turn_reply(last_tid, reply_mid)
             return
-        store.add_turn("user", (msg.text or "[图片]")[:400])
+        tid = store.add_turn("user", (msg.text or "[图片]")[:400])
+        if reply_mid and tid:
+            store.set_turn_reply(tid, reply_mid)
+
+    @staticmethod
+    def _incoming_reply_mid(msg: IncomingMessage) -> str:
+        """用户这条消息引用了哪一条（reply 段里的 id；没有就空串）。"""
+        raw = msg.raw or {}
+        for seg in (raw.get("message") or []):
+            if isinstance(seg, dict) and seg.get("type") == "reply":
+                d = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+                rid = str(d.get("id") or d.get("message_id") or "").strip()
+                if rid:
+                    return rid
+        return str(raw.get("_reply_id") or "").strip()
 
     @staticmethod
     def _is_sticker_only(msg: IncomingMessage) -> bool:
@@ -1656,7 +1692,8 @@ class Companion:
         # 对方再发一句「晚安」这种收尾话 —— 不再走完整管线
         # （原来的行为：对着「晚安」再写一大段，或者干脆把窗口重新点着继续聊）。
         if self.conversation.in_close() and is_closing_text(msg.text or ""):
-            self._store_user_turns(self.store, msg)
+            self._store_user_turns(self.store, msg,
+                                   self._incoming_reply_mid(msg))
             print(f"[main] 互道收尾（{msg.text[:12]}…）→ 超短回应或沉默")
             if random.random() < 0.5:
                 await self.sender.reply(
@@ -1847,6 +1884,7 @@ class Companion:
             time_text=time_text,
             trait_text=relation,
             presence_text=self.presence_text,
+            self_name=self.characters.primary.name,
         )
         self.store.kv_set("last_analysis", {**analysis, "emotion_tag": emotion})
         if analysis.get("intent"):
@@ -1890,7 +1928,7 @@ class Companion:
                                  importance=1.0, flagged=True)
             print(f"[main] ⚠️ 风险信号：{risk}")
 
-        self._store_user_turns(self.store, msg)
+        self._store_user_turns(self.store, msg, self._incoming_reply_mid(msg))
 
         # ★ 会话恢复：最近 7 天内上一次会话的摘要 —— 新开话时它
         # 还记得上次聊到哪（防「跨会话身份断裂」）

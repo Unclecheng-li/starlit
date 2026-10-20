@@ -70,6 +70,17 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         with self._lock:
             self.conn.executescript(SCHEMA)
+            # ★ 旧库补列：`reply_mid` = 这条消息「引用回复」了哪一条（存引用的
+            #   实时 mid）。私聊历史回放/多端同步靠它画出引用块 —— 之前只存
+            #   纯文本，刷新一次引用就没了（用户实测报障）。
+            try:
+                cols = {r[1] for r in
+                        self.conn.execute("PRAGMA table_info(transcript)")}
+                if "reply_mid" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE transcript ADD COLUMN reply_mid TEXT")
+            except sqlite3.Error:
+                pass
             self.conn.commit()
 
     def close(self) -> None:
@@ -194,12 +205,28 @@ class Store:
         return out
 
     # ---------- transcript ----------
-    def add_turn(self, role: str, text: str, ts: Optional[float] = None) -> int:
+    def add_turn(self, role: str, text: str, ts: Optional[float] = None,
+                 reply_mid: str = "") -> int:
         cur = self._exec(
-            "INSERT INTO transcript(ts,role,text) VALUES(?,?,?)",
-            (float(ts) if ts else time.time(), role, text),
+            "INSERT INTO transcript(ts,role,text,reply_mid) VALUES(?,?,?,?)",
+            (float(ts) if ts else time.time(), role, text,
+             str(reply_mid or "")),
         )
         return int(cur.lastrowid or 0)
+
+    def set_turn_reply(self, turn_id: int, reply_mid: str) -> None:
+        """补记「这条消息引用了哪条」（发送时 mid 已知，或事后补写）。"""
+        self._exec(
+            "UPDATE transcript SET reply_mid=? WHERE id=?",
+            (str(reply_mid or ""), int(turn_id)))
+
+    def recent_turn_ids(self, n: int = 3) -> List[int]:
+        """最近 n 条 turn 的 id（发送后要回填引用信息，靠它定位）。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT id FROM transcript ORDER BY id DESC LIMIT ?", (int(n),)
+            ).fetchall()
+        return [int(r["id"]) for r in rows]
 
     def get_turn(self, turn_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:

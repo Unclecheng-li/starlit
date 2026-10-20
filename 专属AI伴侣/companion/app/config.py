@@ -277,7 +277,7 @@ class GroupConfig:
     # ── 频率预算（与私聊配额完全隔离，计数带 g: 前缀存在群库）──
     msgs_per_hour: int = 18
     msgs_per_hour_burst: int = 5
-    daily_max_total: int = 120
+    daily_max_total: int = 600
     daily_max_per_member: int = 10
     # ★ 90 秒太长：实测同一个人 30.8% 的发言是**紧接着自己上一条**补一句
     #   （间隔 0 条别人的消息 → 秒级），相邻全体消息中位间隔只有 9 秒。

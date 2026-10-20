@@ -152,6 +152,9 @@ class OneBotServerChannel:
         self._recent_events: List[Dict[str, Any]] = []
         # 实时消息 id → 会话/角色/文本，撤回时用来定位 transcript。
         self._live_msgs: Dict[str, Dict[str, Any]] = {}
+        # 合并转发（「聊天记录」）的内容：id → node 列表。客户端点开卡片时
+        # 用 get_forward_msg 取回（自托管链路里内容只能由 vol 保管）。
+        self._forwards: Dict[str, List[Dict[str, Any]]] = {}
         self._api_table = self._build_api_table()
         # 兼容 main.py：channel.connected / ever_connected / _clients
         self.connected = asyncio.Event()
@@ -445,6 +448,8 @@ class OneBotServerChannel:
             "send_msg": self.api_send_msg,
             "send_private_msg": self.api_send_msg,
             "send_group_msg": self.api_send_group_msg,
+            "send_private_forward_msg": self.api_send_private_forward_msg,
+            "send_group_forward_msg": self.api_send_group_forward_msg,
             "get_friend_msg_history": self.api_get_friend_msg_history,
             "get_group_msg_history": self.api_get_group_msg_history,
             "get_msg": self.api_get_msg,
@@ -607,6 +612,10 @@ class OneBotServerChannel:
             segments, self.cfg.owner_id)
         # base64:// 不是 NapCat 的 file_id —— 别让它触发 get_image 旁路
         img_ids = [i for i in img_ids if not str(i).startswith("base64://")]
+        # ★ 合并转发：登记内容并把正文并入 text。fwd_ids 清空 —— 正文已经在
+        #   text 里了，再让主管线 fetch 一遍会重复一遍。
+        text = self._prepare_forwards(segments, text)
+        fwd_ids = []
 
         if images:
             now = time.time()
@@ -641,6 +650,66 @@ class OneBotServerChannel:
 
     async def api_send_group_msg(self, params: Dict[str, Any]) -> Dict[str, Any]:
         return await self.api_send_msg(params)
+
+    async def api_send_private_forward_msg(
+            self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """合并转发（私聊）。Stapxs 合并转发走的是这个 action。
+
+        messages = [{type:"node", data:{user_id, nickname, content:[段]}}, …]
+        """
+        return await self._api_send_forward(params, group=False)
+
+    async def api_send_group_forward_msg(
+            self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """合并转发（群聊）。"""
+        return await self._api_send_forward(params, group=True)
+
+    async def _api_send_forward(self, params: Dict[str, Any],
+                                *, group: bool) -> Dict[str, Any]:
+        """收到一份合并转发：存内容 → 推「聊天记录」卡片 → 正文进主管线。
+
+        卡片段只带 id + 摘要（和 QQ 一致，内容点开再取）；正文另外并入
+        text 喂主管线，这样星野和新增角色都能读到里面说了什么。
+        """
+        nodes = self._nodes_of(params.get("messages"))
+        mid = str(next(self._msg_ids))
+        if not nodes:
+            return {"message_id": mid}          # 空的转发：不回错误，静默
+        fid = self._register_forward(nodes)
+        segments = [self._forward_seg(fid, nodes)]
+        body = self._forward_text(nodes)
+        text = ("【转发了一段聊天记录，内容见下】"
+                + (("\n" + body) if body else "")).strip()
+        if group:
+            gid = str(params.get("group_id") or "")
+            if not self._has_group(gid):
+                print(f"[onebot-server] 转发到未知群（group_id={gid}），忽略")
+                return {"message_id": mid}
+            raw = {"message_type": "group", "time": int(time.time()),
+                   "user_id": int(self.cfg.owner_id or 0),
+                   "group_id": int(gid) if gid.isdigit() else gid,
+                   "message": segments}
+            msg = IncomingMessage(
+                kind="group", user_id=str(self.cfg.owner_id or ""),
+                group_id=gid, peer_id=gid, message_id=mid,
+                nickname=self.scfg.owner_nickname, text=text,
+                mentions_self=False, raw=raw)
+            asyncio.create_task(
+                self._push_user_message(mid, segments, text, "", group_id=gid))
+            asyncio.create_task(self._safe_handle(msg))
+            return {"message_id": mid}
+        peer_id = str(params.get("user_id") or self.cfg.self_id or "")
+        raw = {"message_type": "private", "time": int(time.time()),
+               "user_id": int(self.cfg.owner_id or 0) if self.cfg.owner_id else 0,
+               "message": segments, "_target_id": peer_id}
+        msg = IncomingMessage(
+            kind="private", user_id=str(self.cfg.owner_id or ""),
+            peer_id=peer_id, group_id="", message_id=mid,
+            nickname=self.scfg.owner_nickname, text=text,
+            mentions_self=False, raw=raw)
+        asyncio.create_task(self._push_user_message(mid, segments, text, peer_id))
+        asyncio.create_task(self._safe_handle(msg))
+        return {"message_id": mid}
 
     @staticmethod
     def _reply_id_of(segments: Any) -> str:
@@ -677,6 +746,9 @@ class OneBotServerChannel:
         text, images, mentioned, img_ids, img_sizes, fwd_ids = parse_message(
             segments, self.cfg.owner_id)
         img_ids = [i for i in img_ids if not str(i).startswith("base64://")]
+        # ★ 合并转发：登记内容并把正文并入 text（fwd_ids 清空，理由同私聊）
+        text = self._prepare_forwards(segments, text)
+        fwd_ids = []
         mid = str(next(self._msg_ids))
         raw = {"message_type": "group", "time": int(time.time()),
                "user_id": int(self.cfg.owner_id or 0),
@@ -798,6 +870,14 @@ class OneBotServerChannel:
             q = self._quoted_of(gid, segments)
             if q:
                 event["reply"] = q
+        else:
+            # ★ 私聊也要挂 reply：Stapxs 在私聊里也能「引用回复」，服务端不把
+            #   被引用那条带回去，客户端就只看到自己发的话、看不到引用块
+            #   （用户实测「引用回复发出来后依然没有看到引用」）。
+            rid = self._reply_id_of(segments)
+            q = self._quoted_private(str(peer_int), rid) if rid else None
+            if q:
+                event["reply"] = q
         self._live_msgs[mid] = {
             "role": "user", "peer_id": str(peer_int),
             "ts": float(event["time"]), "text": text,
@@ -855,18 +935,48 @@ class OneBotServerChannel:
         return rid
 
     def _quoted_by_mid(self, gid: str, mid: str) -> Optional[Dict[str, Any]]:
-        """按 mid 取出被引用消息的「昵称 + 摘要」（历史和实时都用它）。"""
+        """按 mid 取出被引用消息的「昵称 + 摘要」（历史和实时都用它）。
+
+        ★ 先问群引擎：它手里有「我那条消息的**实时随机 id** ↔ 库内 g&lt;id&gt;」
+        的对照表。我引用自己刚发的那条群消息时，客户端拿到的 mid 就是那个
+        随机 id —— 只按库内 mid 查会查不到，引用块就永远画不出来
+        （用户实测：引用自己发的话，发出去看不到引用）。
+        """
         rid = self._base_mid(mid)
         if not rid:
             return None
         api = self.group_api
         if not api or not self._has_group(str(gid or "")):
             return None
+        q = getattr(api, "group_quoted", None)
+        if q:
+            try:
+                got = q(gid, rid)
+            except Exception:  # noqa: BLE001
+                got = None
+            if got:
+                return got
         try:
             src = api.group_store_for(gid).find_gmsg(rid)
         except Exception:  # noqa: BLE001
             src = None
         if not src:
+            # ★ 兜底：我那条消息的事件是**先推、后落库**的，推的时候库内 mid
+            #   还没生成、群引擎的对照表也是之后才写好 —— 于是「引用自己刚发
+            #   的那条」在实时事件里 resolve 不出来（历史回放却是好的，用户
+            #   看到的就是「发出来后没有引用」）。这里直接用通道自己记下的
+            #   实时消息（_live_msgs）兜底。
+            info = self._live_msgs.get(rid)
+            if info and str(info.get("group_id") or "") == str(gid or ""):
+                role = str(info.get("role") or "")
+                if role == "user":
+                    name = self.scfg.owner_nickname
+                else:
+                    char = (self.characters.get(str(info.get("peer_id") or ""))
+                            if self.characters else None)
+                    name = char.name if char else self.scfg.bot_nickname
+                return {"message_id": rid, "name": name,
+                        "text": str(info.get("text") or "")[:80].replace("\n", " ")}
             return None
         kind = str(src.get("kind") or "")
         if kind == "user":
@@ -877,6 +987,53 @@ class OneBotServerChannel:
             name = str(src.get("sender_name") or "成员")
         return {"message_id": str(src.get("mid") or rid), "name": name,
                 "text": str(src.get("text") or "")[:80].replace("\n", " ")}
+
+    def _quoted_private(self, peer_id: str,
+                        mid: str) -> Optional[Dict[str, Any]]:
+        """私聊里按 mid 取「被引用那条」的昵称 + 摘要。
+
+        私聊没有群那样的 `g&lt;id&gt;` 库内 mid：历史回放用 `h&lt;turn id&gt;`，
+        实时那条则是一个随机序号（存在 `_live_msgs` 里）。两种都要认。
+        """
+        rid = self._base_mid(mid)
+        if not rid:
+            return None
+        # ① 实时消息（随机序号 / h<id> 都可能在 _live_msgs 里）
+        info = self._live_msgs.get(rid) or self._live_msgs.get(str(mid or ""))
+        if info and not str(info.get("group_id") or ""):
+            role = str(info.get("role") or "")
+            return {"message_id": rid,
+                    "name": self._peer_name(str(info.get("peer_id") or peer_id),
+                                            role),
+                    "text": str(info.get("text") or "")[:80].replace("\n", " ")}
+        # ② 历史消息：h<turn id> → transcript 行
+        tid = 0
+        if rid.startswith("h"):
+            try:
+                tid = int(rid[1:])
+            except ValueError:
+                tid = 0
+        if not tid:
+            return None
+        store = self.store_for(peer_id) if self.store_for else self.store
+        try:
+            turn = store.get_turn(tid) if store else None
+        except Exception:  # noqa: BLE001
+            turn = None
+        if not turn:
+            return None
+        role = str(turn.get("role") or "")
+        return {"message_id": rid, "name": self._peer_name(peer_id, role),
+                "text": str(turn.get("text") or "")[:80].replace("\n", " ")}
+
+    def _peer_name(self, peer_id: str, role: str) -> str:
+        """私聊引用块里的显示名：我发的是我，角色发的是角色名。"""
+        if role == "user":
+            return self.scfg.owner_nickname
+        char = self.characters.get(str(peer_id)) if self.characters else None
+        if char:
+            return char.name
+        return self.scfg.bot_nickname
 
     # ---------------- vol → 客户端（Sender 调用的接口） ----------------
 
@@ -965,6 +1122,11 @@ class OneBotServerChannel:
             q = self._quoted_by_mid(gid, reply_to_mid)
             if q:
                 event["reply"] = q
+        elif reply_to_mid:
+            # 私聊同理：角色引用我上一句时也要把引用块带回去
+            q = self._quoted_private(str(sid), reply_to_mid)
+            if q:
+                event["reply"] = q
         self._live_msgs[mid] = {
             "role": "assistant", "peer_id": str(sid),
             "ts": float(event["time"]), "text": raw_text,
@@ -1037,9 +1199,174 @@ class OneBotServerChannel:
                 pass
         return p.as_uri()
 
+    # ---------------- 合并转发（QQ「聊天记录」） ----------------
+    #
+    # 自托管链路里 vol 自己就是服务端，所以「合并转发」的内容只能由 vol 保管：
+    # 客户端（Stapxs）发合并转发时调 `send_private_forward_msg` /
+    # `send_group_forward_msg`（messages = node 列表），点开卡片时调
+    # `get_forward_msg` 取内容。这两个 action 以前**都没实现** —— 于是转发被当成
+    # 未知 action 静默丢弃、`get_forward_msg` 又永远返回空，客户端只能显示一句
+    # 「[聊天记录]」并且点不开（用户实测报障）。
+
+    @staticmethod
+    def _seg_flat_text(segs: Any) -> str:
+        """把消息段数组拍成一行的可读文本（转发节点内部用）。"""
+        parts: List[str] = []
+        for s in (segs or []):
+            if not isinstance(s, dict):
+                continue
+            t = s.get("type")
+            d = s.get("data") if isinstance(s.get("data"), dict) else {}
+            if t == "text":
+                parts.append(str(d.get("text") or ""))
+            elif t in ("image", "mface", "marketface"):
+                sticker = (str(d.get("sub_type") or "") == "1"
+                           or "动画表情" in str(d.get("summary") or ""))
+                parts.append("[表情包]" if sticker else "[图片]")
+            elif t == "face":
+                parts.append("[表情]")
+            elif t == "record":
+                parts.append("[语音]")
+            elif t == "at":
+                parts.append("@" + str(d.get("qq") or ""))
+            else:
+                parts.append(str(d.get("text") or ""))
+        return "".join(parts).strip()
+
+    def _nodes_of(self, messages: Any) -> List[Dict[str, Any]]:
+        """归一「合并转发」节点 → [{user_id, nickname, content:[段]}]。
+
+        兼容两种形态：标准 OneBot `{type:"node", data:{...}}`，以及
+        Stapxs 发送时的扁平形态（键直接摊在 node 上）。
+        """
+        out: List[Dict[str, Any]] = []
+        for node in (messages or []):
+            if not isinstance(node, dict):
+                continue
+            d = node.get("data") if isinstance(node.get("data"), dict) else node
+            content = d.get("content")
+            if content is None:
+                content = node.get("content")
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (json.JSONDecodeError, ValueError):
+                    content = [{"type": "text", "data": {"text": content}}]
+            if isinstance(content, dict):
+                content = [content]
+            if not isinstance(content, list):
+                content = []
+            out.append({
+                "user_id": str(d.get("user_id") or d.get("uin") or ""),
+                "nickname": str(d.get("nickname") or d.get("name") or ""),
+                "content": content,
+                "time": int(d.get("time") or node.get("time") or 0),
+            })
+        return out
+
+    def _forward_text(self, nodes: List[Dict[str, Any]]) -> str:
+        """把转发节点拍平成「昵称：正文」的多行文本。"""
+        lines: List[str] = []
+        for n in nodes or []:
+            who = str(n.get("nickname") or n.get("user_id") or "某人")
+            body = self._seg_flat_text(n.get("content"))
+            if body:
+                lines.append(f"{who}：{body}")
+        return "\n".join(lines)
+
+    def _register_forward(self, nodes: List[Dict[str, Any]]) -> str:
+        """把一份转发内容存下来，返回本地 id（客户端点开时用它取回）。"""
+        fid = "f" + str(next(self._msg_ids))
+        if nodes:
+            self._forwards[fid] = nodes
+            # 落盘：vol 重启后卡片仍能展开（否则就成了只有 id 的空壳）
+            try:
+                self.store.kv_set(f"forward:{fid}", nodes)
+            except Exception:  # noqa: BLE001
+                pass
+        if len(self._forwards) > 300:
+            for k in list(self._forwards)[:-300]:
+                self._forwards.pop(k, None)
+        return fid
+
+    def _lookup_forward(self, fid: str) -> List[Dict[str, Any]]:
+        fid = str(fid or "").strip()
+        if not fid:
+            return []
+        nodes = self._forwards.get(fid)
+        if nodes:
+            return nodes
+        try:
+            saved = self.store.kv_get(f"forward:{fid}") if self.store else None
+        except Exception:  # noqa: BLE001
+            saved = None
+        if isinstance(saved, list) and saved:
+            self._forwards[fid] = saved
+            return saved
+        return []
+
+    @staticmethod
+    def _forward_seg(fid: str, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """推给客户端的「聊天记录」段（只带 id + 摘要；内容和 QQ 一样另取）。"""
+        return {"type": "forward",
+                "data": {"id": str(fid),
+                         "title": "聊天记录",
+                         "summary": f"查看 {len(nodes)} 条转发消息"}}
+
+    def _prepare_forwards(self, segments: Any, text: str) -> str:
+        """入站消息带「合并转发」段时：登记内容，并把正文并入 text。
+
+        这样角色（星野和新增角色）读到的是**正文**，而不是一句「[聊天记录]」；
+        同时 get_forward_msg 也能把内容交还给客户端。
+        """
+        for seg in (segments or []):
+            if not isinstance(seg, dict):
+                continue
+            t = seg.get("type")
+            d = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+            if t == "forward":
+                nodes = self._nodes_of(d.get("content") or d.get("messages"))
+                fid = str(d.get("id") or d.get("file") or "").strip()
+                if not nodes and fid:
+                    nodes = self._lookup_forward(fid)     # 别的端发过的旧转发
+                if not nodes:
+                    continue
+                if fid:
+                    self._forwards.setdefault(fid, nodes)
+                else:
+                    fid = self._register_forward(nodes)
+                    d["id"] = fid
+                    seg["data"] = d
+                body = self._forward_text(nodes)
+                if body:
+                    text = (text + "\n" + body).strip()
+            elif t == "json":
+                fid = self._multimsg_resid(d)
+                body = self._forward_text(self._lookup_forward(fid)) if fid else ""
+                if body:
+                    text = (text + "\n" + body).strip()
+        return text
+
+    @staticmethod
+    def _multimsg_resid(d: Dict[str, Any]) -> str:
+        """从 QQ 的 multimsg json 卡片里取转发的 resid（取不到返回空串）。"""
+        inner = d.get("data") or ""
+        if isinstance(inner, dict):
+            inner = inner.get("data") or inner.get("resid") or ""
+        try:
+            j = json.loads(str(inner))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return ""
+        if not isinstance(j, dict):
+            return ""
+        det = ((j.get("meta") or {}).get("detail") or {})
+        return str(det.get("resid") or det.get("uniseq")
+                   or j.get("resid") or "").strip()
+
     async def fetch_forward(self, fid: str, max_msgs: int = 60) -> str:
-        """合并转发正文。自托管链路里没有 QQ 的转发结构，返回空。"""
-        return ""
+        """合并转发正文（自托管链路：从 vol 保管的内容里取）。"""
+        nodes = self._lookup_forward(str(fid))
+        return self._forward_text(nodes)[:4000] if nodes else ""
 
     # ---------------- 撤回 ----------------
 
@@ -1211,7 +1538,7 @@ class OneBotServerChannel:
                     mid = f"h{tid}" if n == 1 else f"h{tid}-{idx + 1}"
                 else:
                     mid = str(next(self._msg_ids))
-                messages.append({
+                item = {
                     "message_id": mid,
                     "real_seq": next(seq),
                     "target_id": peer_int,
@@ -1227,7 +1554,14 @@ class OneBotServerChannel:
                     "message": [{"type": "text",
                                  "data": {"text": part}}],
                     "raw_message": part,
-                })
+                }
+                # ★ 引用回复：把被引用那条也带出来，刷新/多端同步后才画得出引用块
+                rm = str(t.get("reply_mid") or "")
+                if rm:
+                    q = self._quoted_private(str(peer_id), rm)
+                    if q:
+                        item["reply"] = q
+                messages.append(item)
         return {"messages": messages, "result": None, "echo": None}
 
     async def api_get_group_msg_history(
@@ -1459,8 +1793,42 @@ class OneBotServerChannel:
     async def api_get_msg(self, _p: Dict[str, Any]) -> Any:
         return None
 
-    async def api_get_forward_msg(self, _p: Dict[str, Any]) -> Any:
-        return {"messages": []}
+    async def api_get_forward_msg(self, p: Dict[str, Any]) -> Any:
+        """合并转发正文：客户端点开「聊天记录」卡片时调。
+
+        返回两份形态，兼容不同客户端：
+          - data.messages[*]  （Stapxs 的 NapCat pathMap 取这个）
+          - data.message[*].data  （Lagrange pathMap）
+        """
+        fid = str(p.get("id") or p.get("message_id")
+                  or p.get("resid") or "").strip()
+        nodes = self._lookup_forward(fid)
+        now = int(time.time())
+        messages: List[Dict[str, Any]] = []
+        for i, n in enumerate(nodes):
+            uid = str(n.get("user_id") or "")
+            content = n.get("content") if isinstance(n.get("content"), list) else []
+            messages.append({
+                "message_id": f"{fid}-{i + 1}" if fid else str(i + 1),
+                "real_seq": i + 1,
+                "target_id": 0,
+                "message_type": "group",
+                "post_type": "message",
+                "time": int(n.get("time") or now),
+                "sender": {"user_id": int(uid) if uid.isdigit() else 0,
+                           "nickname": str(n.get("nickname") or "某人")},
+                "message": content,
+                "content": content,
+                "raw_message": self._seg_flat_text(content),
+            })
+        return {
+            "messages": messages,
+            "message": [{"type": "node",
+                         "data": {"user_id": str(n.get("user_id") or ""),
+                                  "nickname": str(n.get("nickname") or ""),
+                                  "content": n.get("content") or []}}
+                        for n in nodes],
+        }
 
     async def api_noop(self, _p: Dict[str, Any]) -> Any:
         return None

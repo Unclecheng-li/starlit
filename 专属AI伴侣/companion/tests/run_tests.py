@@ -2523,6 +2523,117 @@ async def test_onebot_server() -> None:
         check("未实现 action 返回 ok/null（不弹错）",
               r.get("status") == "ok" and r.get("data") is None, str(r))
 
+        # ── 合并转发（「聊天记录」）──
+        # 以前 send_private_forward_msg 是未知 action（整条被静默丢弃）、
+        # get_forward_msg 永远返回空 —— 客户端只显示「[聊天记录]」还点不开。
+        fwd_nodes = [
+            {"type": "node", "data": {
+                "user_id": 10002, "nickname": "老师",
+                "content": [{"type": "text", "data": {"text": "中午吃米粉"}}]}},
+            {"type": "node", "data": {
+                "user_id": 10001, "nickname": "星野",
+                "content": [{"type": "text", "data": {"text": "带牛肉那种？"}}]}},
+        ]
+        r = await call(ws, "send_private_forward_msg",
+                       {"user_id": 10001, "messages": fwd_nodes})
+        check("send_private_forward_msg 受理 ok 且有 message_id",
+              r.get("status") == "ok" and (r.get("data") or {}).get("message_id"),
+              str(r))
+        got = await drain(ws, 0.8)
+        fwd_ev = next((e for e in (events + got)
+                       if any(s.get("type") == "forward"
+                              for s in (e.get("message") or []))), None)
+        check("转发推成「聊天记录」段（带 id，可点开）",
+              fwd_ev is not None, str(got)[:200])
+        fid = ""
+        if fwd_ev:
+            fseg = next(s for s in fwd_ev["message"]
+                        if s.get("type") == "forward")
+            fid = str((fseg.get("data") or {}).get("id") or "")
+            check("转发段带 id 且标题为「聊天记录」",
+                  bool(fid)
+                  and (fseg.get("data") or {}).get("title") == "聊天记录",
+                  str(fseg))
+        await asyncio.sleep(0.3)
+        fwd_msg = received[-1] if received else None
+        check("★ 主管线读到转发正文（不是「[聊天记录]」）",
+              fwd_msg is not None
+              and "中午吃米粉" in (fwd_msg.text or "")
+              and "带牛肉那种？" in (fwd_msg.text or ""),
+              str(fwd_msg.text if fwd_msg else None))
+        r = await call(ws, "get_forward_msg", {"id": fid})
+        fmsgs = (r.get("data") or {}).get("messages") or []
+        check("★ get_forward_msg 能取回转发内容（客户端点开用）",
+              len(fmsgs) == 2
+              and fmsgs[0]["sender"]["nickname"] == "老师"
+              and fmsgs[0]["raw_message"] == "中午吃米粉",
+              str(r.get("data"))[:300])
+        r = await call(ws, "get_forward_msg", {"id": "not-there"})
+        check("未知 id 的 get_forward_msg 返回空（不报错）",
+              r.get("status") == "ok"
+              and (r.get("data") or {}).get("messages") == [], str(r))
+        # 归属未知群：静默受理（不报错、不炸主管线）
+        r = await call(ws, "send_group_forward_msg",
+                       {"group_id": 9999, "messages": fwd_nodes})
+        check("转发到未知群：静默受理",
+              r.get("status") == "ok" and (r.get("data") or {}).get("message_id"),
+              str(r))
+        # 普通 send_msg 里内联内容的转发段：也要登记 + 能读正文
+        r = await call(ws, "send_msg", {
+            "user_id": 10001,
+            "message": [{"type": "forward", "data": {
+                "content": [{"type": "node", "data": {
+                    "user_id": 10002, "nickname": "老师",
+                    "content": [{"type": "text",
+                                 "data": {"text": "内嵌的转发"}}]}}]}}],
+        })
+        await asyncio.sleep(0.3)
+        m3 = received[-1] if received else None
+        check("★ 内联内容的转发也能读正文",
+              m3 is not None and "内嵌的转发" in (m3.text or ""),
+              str(m3.text if m3 else None))
+        fwd3 = next((s for s in ((m3.raw.get("message") or []) if m3 else [])
+                     if s.get("type") == "forward"), None)
+        fid3 = str(((fwd3 or {}).get("data") or {}).get("id") or "")
+        check("内联转发被分配了可取回的 id", bool(fid3), str(fwd3))
+        if fid3:
+            r = await call(ws, "get_forward_msg", {"id": fid3})
+            check("内联转发的 id 也能取回内容",
+                  len((r.get("data") or {}).get("messages") or []) == 1,
+                  str(r.get("data"))[:200])
+
+        # ── 引用回复（私聊）：以前私聊路径压根不挂 reply，引用块画不出来 ──
+        r = await call(ws, "send_msg", {
+            "user_id": 10001,
+            "message": [{"type": "reply", "data": {"id": "h1"}},
+                        {"type": "text", "data": {"text": "这条消息我要引用"}}],
+        })
+        check("私聊引用消息受理 ok", r.get("status") == "ok", str(r))
+        got = await drain(ws, 0.8)
+        q_ev = next((e for e in (events + got)
+                     if e.get("post_type") == "message_sent"
+                     and e.get("reply")), None)
+        check("★ 私聊 message_sent 带上被引用那条（reply 字段）",
+              q_ev is not None
+              and str((q_ev.get("reply") or {}).get("message_id")) == "h1",
+              str(q_ev)[:220])
+        check("被引用那条的摘要正确",
+              q_ev is not None
+              and "鲸鱼" in str((q_ev.get("reply") or {}).get("text") or ""),
+              str((q_ev.get("reply") or {})))
+        # 历史回放也要能画出引用块。这里的 on_message 是桩（只 append），
+        # 不跑主管线，所以手动补一条「带 reply_mid 的用户消息」来模拟落库。
+        hist.add_turn("user", "这条消息我要引用", reply_mid="h1")
+        r = await call(ws, "get_friend_msg_history",
+                       {"message_type": "private", "user_id": 10001,
+                        "message_seq": 0, "count": 30})
+        hist_msgs = (r.get("data") or {}).get("messages") or []
+        with_q = [m for m in hist_msgs if m.get("reply")]
+        check("★ 私聊历史回放里也带着引用信息",
+              bool(with_q)
+              and str(with_q[-1]["reply"].get("message_id")) == "h1",
+              str(with_q)[:220])
+
         # ── 心跳（heartbeat_sec=5，等一个周期）──
         got = await drain(ws, 6.5)
         hb = next((e for e in got
@@ -2600,13 +2711,34 @@ def test_traits() -> None:
         check("热情高 → 回复更快",
               hot.reply_seconds < cold.reply_seconds,
               f"{hot.reply_seconds:.0f}s vs {cold.reply_seconds:.0f}s")
-        check("回复节奏倍率在合理区间",
-              0.12 <= hot.delay_scale <= 6.0,
+        check("回复节奏倍率在合理区间（×3 后下限放到 0.04）",
+              0.04 <= hot.delay_scale <= 6.0,
               str(hot.delay_scale))
         mid = T.Traits(enthusiasm=50, affection=60)
         check("热情 50 的主动频率已放大 4 倍",
               abs(mid.sessions_per_day - 4.92) < 0.01,
               str(mid.sessions_per_day))
+        # ★ 2026-10-20：热情/好感的影响再 ×3
+        from app.config import AutonomyConfig as _AC
+        mid_auto = T.derive_autonomy(_AC(), mid)
+        check("★ 热情 ×3：每日主动额度抬高（热情 50 → 21 次/天）",
+              mid_auto.daily_max == 21, str(mid_auto.daily_max))
+        check("★ 热情 ×3：两次主动最小间隔 ÷3（热情 50 → 10 分钟）",
+              mid_auto.min_gap_min == 10, str(mid_auto.min_gap_min))
+        check("★ 热情 ×3：顺延概率 ÷3（热情 50 → 约 0.067）",
+              abs(mid_auto.skip_probability - 0.067) < 0.01,
+              str(mid_auto.skip_probability))
+        from app.config import ConversationConfig as _CC
+        mid_conv = T.derive_conversation(_CC(), mid)
+        check("★ 好感 ×3：活跃会话窗口抬高（好感 60 → 约 155 分钟）",
+              mid_conv.active_window_min >= 150, str(mid_conv.active_window_min))
+        check("★ 好感 ×3：接话与追问上限抬高、但连发条数按硬上限封住",
+              mid_conv.max_followups_per_topic >= 12
+              and mid_conv.max_bot_turns_without_reply >= 12
+              and mid_conv.max_burst_bubbles <= 9,
+              f"{mid_conv.max_followups_per_topic}/"
+              f"{mid_conv.max_bot_turns_without_reply}/"
+              f"{mid_conv.max_burst_bubbles}")
         check("热情 50 的回复耗时已缩短到 1/4",
               abs(mid.reply_seconds - 6.0) < 0.01,
               str(mid.reply_seconds))
@@ -3192,6 +3324,26 @@ async def test_group_engine() -> None:
         check("拦下来的原因是上限或冷却",
               ("上限" in why or "冷却" in why), why)
 
+        # ★ 群主发言必须有人回：群级大额闸门（每小时/每日总量）打满也不能静默
+        rt._round_count = 0
+        rt._ai_chain = 0
+        rt._cooldown_until = 0.0
+        _saved_total = rt.gcfg.daily_max_total
+        rt.gcfg.daily_max_total = 0
+        ok3, why3 = rt.can_speak("2001")
+        check("群级日总量打满时普通发言仍被拦（防线还在）",
+              (not ok3) and "今日群消息" in why3, why3)
+        ok4, why4 = rt.can_speak("2001", ignore_total=True)
+        check("★ 但「回群主」能越过群级总量（不会再全员静默）", ok4, why4)
+        rt.gcfg.daily_max_total = _saved_total      # 复原，别影响后面的断言
+        specs = {s[0]: s for s in rt.LIMIT_SPECS}
+        check("面板里能看到「全群每天最多几条」",
+              "daily_max_total" in specs, str(list(specs)))
+        check("每小时/每人每日上限的天花板已抬高",
+              specs["msgs_per_hour"][4] >= 999
+              and specs["daily_max_per_member"][4] >= 999,
+              f"{specs['msgs_per_hour'][4]}/{specs['daily_max_per_member'][4]}")
+
         # ── 全员禁言 ────────────────────────────────────────
         rt.store.set_mute_all(True, by="老师")
         n_before = len(ch._out_lines)
@@ -3276,7 +3428,7 @@ async def test_group_engine() -> None:
               str(rt.gcfg.chain_reply_probability))
         check("越界的值会被夹到范围内",
               rt.apply_limits({"msgs_per_hour": 9999}) is not None
-              and rt.gcfg.msgs_per_hour == 60, str(rt.gcfg.msgs_per_hour))
+              and rt.gcfg.msgs_per_hour == 999, str(rt.gcfg.msgs_per_hour))
         payload = rt.limits_payload()
         check("给界面的参数表带上了范围/单位/当前值",
               all(k in payload[0] for k in
@@ -3825,6 +3977,123 @@ async def test_history_recall_and_split() -> None:
     tmp.close()
 
 
+# ---------------------------------------------------------------- 话题发散
+async def test_group_topic_divergence() -> None:
+    """群话题发散：全群说烂的词要被抓出来、名字不能被误伤、硬闸门只拦复读。
+
+    背景（用户实测）：老师在群里提了一次「米粉」，之后几十条全在聊米粉 ——
+    相邻两条共享话题词 58%，真实群只有 10%。根因是群发言的禁用词只统计
+    「她自己说过的话」，而私聊那套还刻意豁免「对方提到过的词」。
+    """
+    from app.act import Sender
+    from app.channel.console import ConsoleChannel
+    from app.config import GroupConfig
+    from app.group import GroupRuntime, Member
+    from app.group_store import GroupRegistry
+    from app.memory import Memory
+    from app.state import StateMachine
+    from app.think import group_overused_terms
+    from app.traits import Traits
+    from tests.mock_llm import MockLLM
+
+    section("群话题发散（别全群咬住一个话题）")
+
+    # ① 纯函数：谁的都算；名字/称呼不算话题
+    texts = ["米粉排到哪了", "米粉那队多长", "我也想吃米粉",
+             "爱丽丝刚吃了米粉", "走廊全是人", "走廊挤死了", "走廊太挤了"]
+    names = ["天童爱丽丝", "橘光", "老师"]
+    terms = group_overused_terms(texts, names)
+    check("说多了的「米粉」被抓出来", "米粉" in terms, str(terms))
+    check("「走廊」这种地点也算话题词", "走廊" in terms, str(terms))
+    check("★ 成员名里的字被排除（爱丽/丽丝不是在聊爱丽丝）",
+          "爱丽" not in terms and "丽丝" not in terms, str(terms))
+    check("出现次数不够的不算（1~2 次不算说多了）",
+          "想吃" not in terms, str(terms))
+
+    # ② 引擎侧：拿真库里的群消息去统计 + 硬闸门
+    d = Path(tempfile.mkdtemp())
+    cfg = tmpcfg()
+    cfg.group = GroupConfig(index_path=str(d / "g.json"),
+                            dir_path=str(d / "g"), ambient_enabled=False,
+                            chain_reply_probability=0.0)
+    ch = ConsoleChannel(self_id="10000", owner_id="10001")
+    sender = Sender(ch, cfg.behavior)
+    st = Store(str(d / "m.db"))
+    mem = Member(id="2001", name="甲", persona="你是测试角色。", boundaries="",
+                 world="", state=StateMachine(st), memory=Memory(st, None),
+                 store=st, traits=Traits(enthusiasm=60, affection=70),
+                 delay_scale=1.0)
+    reg = GroupRegistry(cfg)
+    g = reg.create("测试群", "10001", "老师", member_ids=["2001"],
+                   member_names={"2001": "甲", "3001": "天童爱丽丝"})
+    rt = GroupRuntime(cfg, g, reg, MockLLM(), sender,
+                      lambda cid: mem if str(cid) == "2001" else None)
+    try:
+        for t in ("米粉排到哪了", "米粉那队老长了", "中午又是米粉",
+                  "爱丽丝也说想吃米粉"):
+            rt.store.add_gmsg(kind="char", sender_id="2001", sender_name="甲",
+                              text=t)
+        banned = rt._overused_topic_terms()
+        check("引擎统计出全群说烂的词", "米粉" in banned, str(banned))
+        check("「爱丽」不在禁用词里（人名不是话题）",
+              "爱丽" not in banned, str(banned))
+        check("★ 硬闸门拦「同一个词说两遍」",
+              rt.topic_ban_reason("米粉排到哪了，米粉那队真长") != "", "")
+        check("偶尔提一次照常放行（宽容）",
+              rt.topic_ban_reason("米粉排到哪了") == "", "")
+        check("讲自己的事不会被误拦",
+              rt.topic_ban_reason("我刚把枪擦完了") == "", "")
+        check("草稿禁用词里带上了全群话题词",
+              "米粉" in rt._group_avoid_terms(mem),
+              str(rt._group_avoid_terms(mem)))
+
+        # ③ 身份：分析通道必须按角色写「你自己」的名字（原来写死「小星」）
+        from app.think import analyze as _analyze
+
+        class _Cap:
+            def __init__(self) -> None:
+                self.sys = ""
+
+            async def chat_json(self, messages, **kw):
+                self.sys = "\n".join(str(m.get("content") or "")
+                                     for m in messages
+                                     if m.get("role") == "system")
+                return {}
+
+        cap = _Cap()
+        await _analyze(cap, user_text="你好", recent=[], profile_text="",
+                       state_text="", self_name="早濑优香")
+        check("★ 分析通道按角色写入自己的名字（不再写死小星）",
+              "早濑优香" in cap.sys and "小星" not in cap.sys, cap.sys[-160:])
+
+        # ④ 情绪优先：他难受时切成「先接住他」，而不是各说各的
+        class _Emo:
+            async def chat_json(self, messages, **kw):
+                return {"label": "低落", "intensity": 0.8, "valence": -0.6,
+                        "arousal": 0.3, "need": "被安慰", "quality": 0.5,
+                        "risk": "低落"}
+
+        rt.llm = _Emo()
+        hit = await rt._detect_comfort("我面试没过，挺难受的")
+        check("★ 倾诉会被判成「要人接住」", hit and rt._in_comfort(), str(hit))
+        scene = rt._group_scene(mem)
+        check("★ 情绪优先时场景切成「先接住他」",
+              "接住" in scene and "群里其他任何人" in scene, scene[-200:])
+        check("情绪优先时不再禁「面试」这类当前话题",
+              rt._in_comfort(), "")
+        for t in ("面试没过", "那家公司", "面试真的难受"):
+            rt.store.add_gmsg(kind="char", sender_id="2001", sender_name="甲",
+                              text=t)
+        rt.store.add_gmsg(kind="user", sender_id="10001", sender_name="老师",
+                          text="我面试没过，挺难受的")
+        check("老师当前话题里的词不会被当成「说烂了」",
+              "面试" not in rt._overused_topic_terms(),
+              str(rt._overused_topic_terms()))
+    finally:
+        rt.close()
+        st.close()
+
+
 # ---------------------------------------------------------------- run
 async def main() -> int:
     print("离线测试开始（不需要 API Key / 联网）")
@@ -3862,6 +4131,7 @@ async def main() -> int:
     await test_schedule_and_share_card()
     test_group_store()
     await test_group_engine()
+    await test_group_topic_divergence()
     await test_group_files_and_quote()
     await test_history_recall_and_split()
     test_hygiene()

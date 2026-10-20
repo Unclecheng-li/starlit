@@ -120,7 +120,7 @@ ANALYZE_SYSTEM = """你是对话分析器。只输出 JSON。
 - reply_strategy: 建议的回应策略（一句话，具体点，别写废话）
 - quality: 0~1，这轮互动质量
 - profile_updates: 需要记住的对方信息，数组，每项 {"key": "...", "value": "..."}，没有就空数组
-- self_facts: 关于**你自己（小星）**的事实或承诺，数组，每项 {"key": "...", "value": "..."}。
+- self_facts: 关于**你自己（{self}）**的事实或承诺，数组，每项 {"key": "...", "value": "..."}。
   比如对方纠正你的身份（「你是AI/是程序」）、你答应过对方的事、你亲口承认过的偏好。
   这些是要长期记住的，没有就空数组
 - interest_terms: 提到的兴趣关键词，数组，没有就空数组
@@ -141,7 +141,14 @@ async def analyze(
     time_text: str = "",
     trait_text: str = "",
     presence_text: str = "",
+    self_name: str = "星野",
 ) -> Dict[str, Any]:
+    # ★ 「你自己是谁」必须按角色传进来。原来提示词里硬编码写死了「小星」——
+    #   于是每个新增角色（优香、日奈…）在分析通道里都被当成小星，摘要写进
+    #   她的长期记忆（「对方邀请小星进群」「称呼小星为日奈酱」），下一次
+    #   记忆召回又把「小星」喂回提示词 → 她真以为自己叫小星（用户实测：
+    #   优香在群里/私聊里自称小星，还说「优香是群里另一个」）。
+    _analyze_sys = ANALYZE_SYSTEM.replace("{self}", str(self_name or "星野"))
     parts = []
     if time_text:
         parts.append(f"【时间】{time_text}")
@@ -168,7 +175,7 @@ async def analyze(
     try:
         data = await llm.chat_json(
             [
-                {"role": "system", "content": ANALYZE_SYSTEM},
+                {"role": "system", "content": _analyze_sys},
                 {"role": "user", "content": user},
             ],
             temperature=0.2,
@@ -514,6 +521,7 @@ _COMMON_BIGRAMS = {
     "感觉", "东西", "时候", "问题", "直接", "出来", "一样", "哈哈", "嘻嘻",
     "呜嘿", "大叔", "自己", "他们", "我们", "你们", "这样", "那样", "上次",
     "下次", "刚刚", "刚才", "下午", "上午", "晚上", "早上", "一会儿", "等下",
+    "中午", "凌晨", "半夜", "傍晚", "这边", "那边", "我这", "还没", "还没",
     "反正", "另外", "当然", "确实", "好像", "看看", "说说", "聊聊", "回来",
     "对方", "你的", "我的", "就不", "要是", "算了",
 }
@@ -553,6 +561,45 @@ def extract_overused_terms(
             cnt[g] = cnt.get(g, 0) + 1
     ranked = [w for w, c in sorted(cnt.items(), key=lambda kv: -kv[1])
               if c >= 2 and w not in _COMMON_BIGRAMS]
+    return ranked[:top_n]
+
+
+def group_overused_terms(
+    texts: List[str],
+    names: Optional[List[str]] = None,
+    top_n: int = 10,
+    min_count: int = 3,
+    exempt_texts: Optional[List[str]] = None,
+) -> List[str]:
+    """群里**跨全体成员**统计「最近说多了的话题词」，作为全员禁用词。
+
+    私聊那套 extract_overused_terms 只看「自己说过的话」，而且**刻意豁免
+    对方提到过的词**（注释里写着「那是话题本身，必须还能用」）—— 放到群里
+    就是灾难：老师随口提了一次「米粉」，豁免规则让全群把「米粉」当成唯一
+    安全牌，之后几十条全在聊米粉（实测相邻两条共享话题词 58%，真人只有 10%）。
+
+    所以群聊单独统计：**谁的都算，说多了就别再重复**；成员名/老师称呼要
+    排除掉（点名是人名，不是话题）。判定：同一条消息里出现过的中文 bigram
+    记 1 次，跨 ≥min_count 条消息的才算「说多了」。
+    """
+    if not texts:
+        return []
+    cnt: Dict[str, int] = {}
+    for t in texts:
+        for g in _bigrams(t):
+            cnt[g] = cnt.get(g, 0) + 1
+    name_grams: set = set()
+    for n in (names or []):
+        name_grams |= _bigrams(str(n))
+    # ★ 老师**当前那条**在聊的话题必须豁免：不然「面试」这种正在被讨论的词
+    #   会因为被反复提到而被判成「说烂了」禁掉 —— 那正好是把人推开。
+    for t in (exempt_texts or []):
+        name_grams |= _bigrams(str(t))
+    ranked: List[str] = []
+    for w, c in sorted(cnt.items(), key=lambda kv: -kv[1]):
+        if c < min_count or w in _COMMON_BIGRAMS or w in name_grams:
+            continue
+        ranked.append(w)
     return ranked[:top_n]
 
 

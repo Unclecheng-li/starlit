@@ -38,7 +38,9 @@ from .group_store import (KIND_CHAR, KIND_SYSTEM, KIND_USER, ROLE_ADMIN,
                           ROLE_MEMBER, ROLE_OWNER, Group, GroupRegistry,
                           GroupStore)
 from .presence import Presence, presence_text
-from .think import express, extract_overused_terms, format_recent
+from .perceive import tag_emotion
+from .think import (express, extract_overused_terms, format_recent,
+                    group_overused_terms)
 from .traits import Traits, trait_text
 
 # 我（群主）在群里的显示名，喂给提示词时用
@@ -118,6 +120,13 @@ class GroupRuntime:
         self._quiet_check = quiet_check
         self._on_system = on_system
         self.gcfg: GroupConfig = copy.deepcopy(cfg.group)
+        # ★ 「群自己起话头」的间隔也要能按群调：从 ambient_gap_min 派生出两个
+        #   可调字段（lo/hi），界面上就是两根滑杆 —— 想把群聊调热闹就把它调小。
+        _base = (list(self.gcfg.ambient_gap_min or [8, 25]) + [8, 25])[:2]
+        if getattr(self.gcfg, "ambient_gap_lo", None) is None:
+            self.gcfg.ambient_gap_lo = int(_base[0])
+        if getattr(self.gcfg, "ambient_gap_hi", None) is None:
+            self.gcfg.ambient_gap_hi = int(_base[1])
         self.store: GroupStore = registry.store_for(group.id)
         # ★ 每个群一份**自己的**节奏参数（deepcopy，不是共享的 cfg.group）——
         #   否则某个群改了额度会串到所有群去。改动落在这个群自己的库 kv 里。
@@ -132,6 +141,10 @@ class GroupRuntime:
         self._dm_task: Optional[asyncio.Task] = None
         # 「我那条消息的实时 id ↔ 库内 mid」对照表（引用自己刚发的消息时用）
         self._mid_alias: Dict[str, str] = {}
+        # ★ 「老师需要被接住」的窗口：他刚说了件难受的事，这几分钟里群里
+        #   不以「各说各的事」为主，而是先接住他的情绪（用户实测：他分享
+        #   面试失败，大家回半句就跑去讲自己今天干嘛了）。
+        self._comfort_until: float = 0.0
         # 一轮的记账（「一轮」= 距我上条消息，或静默 round_gap_reset_min 分钟）
         self._owner_ts: float = 0.0
         self._round_count: int = 0
@@ -402,7 +415,8 @@ class GroupRuntime:
             self._ai_chain = 0
 
     def can_speak(self, cid: str, *, now: Optional[float] = None,
-                  mention: bool = False) -> Tuple[bool, str]:
+                  mention: bool = False,
+                  ignore_total: bool = False) -> Tuple[bool, str]:
         """能不能开口。返回 (可以, 原因)。这是防刷屏的总闸。
 
         mention=True：**被点名（@ 她 / 文本里叫她的名字）**。
@@ -410,6 +424,13 @@ class GroupRuntime:
         所以额度类闸门（每人每日上限、同人间隔、连续接话、冷却）
         对她一律放行；只有「全员禁言 / 请勿打扰 / 群已关闭」这种
         硬约束仍然拦（那是「所有人都不许说话」的语义）。
+
+        ignore_total=True：**这次是回群主**。群级的大额闸门（每小时上限
+        msgs_per_hour、每日总量 daily_max_total）对它让路 —— 用户实测报障
+        「我在群里说话没人回复我」：全群当天/当小时说满后所有人被拦，我说话
+        群里一片安静。真人不会被集体无视，所以「我发言引出的回应」允许越过
+        这两道闸；其他闸门（每人上限、间隔、连续接话、本轮上限、冷却）照旧
+        生效，免得变成刷屏。
         """
         now = now or time.time()
         if not self.gcfg.enabled:
@@ -435,13 +456,14 @@ class GroupRuntime:
             return False, f"本轮已达上限 {self.gcfg.ai_no_owner_max} 条"
         if self._ai_chain >= self.gcfg.ai_chain_max:
             return False, f"连续接话已达上限 {self.gcfg.ai_chain_max} 条"
-        if self.store.count_since(now - 3600) >= self.gcfg.msgs_per_hour:
+        if not ignore_total and self.store.count_since(
+                now - 3600) >= self.gcfg.msgs_per_hour:
             return False, f"本小时已达上限 {self.gcfg.msgs_per_hour} 条"
         # 日预算：按当天 0 点起算
         day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"),
                                               "%Y-%m-%d"))
         total_today = self.store.count_since(day_start)
-        if total_today >= self.gcfg.daily_max_total:
+        if not ignore_total and total_today >= self.gcfg.daily_max_total:
             return False, f"今日群消息已达上限 {self.gcfg.daily_max_total} 条"
         if self.store.count_gmsgs(uid=cid) >= self.gcfg.daily_max_per_member:
             return False, f"{cid} 今天说够了"
@@ -491,6 +513,113 @@ class GroupRuntime:
                         f"「{str(r.get('text') or '')[:18]}」重合 {overlap:.0%}")
         return ""
 
+    # ---------------- 话题发散（别全群咬住一个话题）----------------
+
+    def _overused_topic_terms(self) -> List[str]:
+        """群里最近说多了的**具体话题词**（跨全体成员统计）。
+
+        实测：老师在群里随口提了一次「米粉」，全群就把「米粉」当成唯一安全牌
+        连说三十多条（相邻两条共享话题词 58%，真人只有 10%）。私聊那套
+        「自己说多了的词」在这里不够用 —— 它只看她一个人，还刻意豁免对方
+        提到的词。这里改成**谁的都算**，全员这轮都别再提。
+        """
+        try:
+            rows = self.store.recent_gmsgs(20, include_revoked=False)
+        except Exception:  # noqa: BLE001
+            return []
+        texts = [str(r.get("text") or "") for r in rows
+                 if str(r.get("kind") or "") != KIND_SYSTEM]
+        names = [str(r.get("sender_name") or "") for r in rows]
+        for cid in self.ai_member_ids():
+            m = self._member_getter(cid)
+            if m:
+                names.append(m.name)
+        names.append(str((self.cfg.qq.server.owner_nickname or "")))
+        names.append(OWNER_LABEL)
+        # 老师最近一两条正在聊的话题要豁免（见 think.group_overused_terms）
+        exempt = [str(r.get("text") or "") for r in rows
+                  if str(r.get("kind") or "") == KIND_USER][-2:]
+        return group_overused_terms(texts, names, exempt_texts=exempt)
+
+    def _group_avoid_terms(self, m: Member) -> List[str]:
+        """本轮禁用词 = 她自己的口头复读 ∪ 全群说多了的话题词（后者为主）。"""
+        rows = self.store.recent_gmsgs(12, include_revoked=False)
+        try:
+            own = extract_overused_terms(
+                [str(r.get("text") or "") for r in rows
+                 if str(r.get("sender_id")) == m.id],
+                [str(r.get("text") or "") for r in rows
+                 if str(r.get("kind") or "") == KIND_USER],
+            )
+        except Exception:  # noqa: BLE001
+            own = []
+        out: List[str] = []
+        for w in list(self._overused_topic_terms()) + list(own):
+            if w and w not in out:
+                out.append(w)
+        return out[:16]
+
+    def topic_ban_reason(self, draft: str,
+                         banned: Optional[List[str]] = None) -> str:
+        """草稿是不是又把「群里说烂的话题词」搬出来了（硬闸门，兜提示词的底）。
+
+        刻意**宽松**：只拦「同一个词说了两次」或「一次搬了两个不同的旧话题」。
+        偶尔提一下照常放行 —— 真人也会回头说一句刚才的事；拦的是那种把整段
+        话都架在旧话题上的复读（「米粉排到哪了…米粉那队…」）。
+        """
+        banned = banned if banned is not None else self._overused_topic_terms()
+        if not banned:
+            return ""
+        text = str(draft or "")
+        hit = [w for w in banned if w in text]
+        if not hit:
+            return ""
+        repeated = [w for w in hit if text.count(w) >= 2]
+        if len(hit) >= 2 or repeated:
+            return ("话题又咬住旧的了：" + "、".join(hit[:4])
+                    + f"（最近 {len(self.store.recent_gmsgs(20))} 条里已说多了）")
+        return ""
+
+    # ---------------- 情绪优先：他难受时先接住他 ----------------
+
+    def _in_comfort(self, now: Optional[float] = None) -> bool:
+        """是不是处在「先接住老师情绪」的窗口里。"""
+        return (now if now is not None else time.time()) < self._comfort_until
+
+    async def _detect_comfort(self, text: str) -> bool:
+        """老师这条是不是「需要人接住」（倾诉 / 受挫 / 难过）。
+
+        ★ 用户实测：他把自己面试失败的过程分享进群，需要安慰，结果大家
+        只回半句「那家公司眼瞎」就各自讲今天干嘛去了 —— 因为群发言压根
+        不跑情绪分析，而上一轮的「讲你自己的事」又在推波助澜。这里补一层
+        轻量打标（复用感知通道）：命中就把接下来几分钟切成「情绪优先」。
+        """
+        try:
+            rows = self.store.recent_gmsgs(8, include_revoked=False)
+            recent = [f"{self._speaker_label(r)}：{str(r.get('text') or '')[:40]}"
+                      for r in rows]
+            emo = await tag_emotion(self.llm, text, recent)
+        except Exception:  # noqa: BLE001
+            return False
+        need = str(emo.get("need") or "")
+        risk = str(emo.get("risk") or "none")
+        try:
+            valence = float(emo.get("valence") or 0.0)
+        except (TypeError, ValueError):
+            valence = 0.0
+        # ★ 门槛不能太松：单看 need 会把「想陪伴/被看见」这种也当难受，
+        #   一句普通的「大家下午好」就可能误触发 → 全群突然改口安慰，更怪。
+        #   所以要求**情绪确实偏负**（效价为负）或有风险信号，才算要人接住。
+        distress_need = need in ("被安慰", "想倾诉")
+        hit = (risk not in ("", "none")
+               or valence <= -0.35
+               or (distress_need and valence <= 0.0))
+        if hit:
+            self._comfort_until = time.time() + 150.0
+            print(f"[group:{self.gid}] 老师要人接住（need={need}｜risk={risk}"
+                  f"｜valence={valence:.2f}）→ 这几轮先安慰，别各说各的")
+        return hit
+
     # ---------------- 发言 ----------------
 
     def _as_bubbles(self, draft: Any, limit: int) -> List[str]:
@@ -509,17 +638,9 @@ class GroupRuntime:
             memory_text = m.memory.recall_text(query, top_k=5)
         except Exception:  # noqa: BLE001
             memory_text = ""
-        try:
-            avoid = extract_overused_terms(
-                [str(r.get("text") or "") for r in
-                 self.store.recent_gmsgs(12, include_revoked=False)
-                 if str(r.get("sender_id")) == m.id],
-                [str(r.get("text") or "") for r in
-                 self.store.recent_gmsgs(12, include_revoked=False)
-                 if str(r.get("kind")) == KIND_USER],
-            )
-        except Exception:  # noqa: BLE001
-            avoid = []
+        # ★ 禁用词：她自己的口头复读 + **全群说多了的话题词**（后者是重点 ——
+        #   只算自己说过的话，就永远拦不住「全群一起聊米粉」）
+        avoid = self._group_avoid_terms(m)
         p = self._presence()
         return await express(
             self.llm,
@@ -534,13 +655,14 @@ class GroupRuntime:
             proactive=True,
             share_kind=share_kind,
             group_text=self._group_scene(m, chained_from=chained_from,
-                                         reply_to_owner=reply_to_owner),
+                                         reply_to_owner=reply_to_owner,
+                                         avoid=avoid),
             world=m.world or "",
             profile_text=m.memory.profile_text(),
             arousal=float(getattr(m.state.emotion, "arousal", 30.0)),
             valence=float(getattr(m.state.emotion, "valence", 0.0)),
             bubble_mode=True,
-            avoid_terms=avoid or None,
+            avoid_terms=(None if self._in_comfort() else (avoid or None)),
             time_text=self._time_text(),
             trait_text=trait_text(m.traits),
             presence_text=presence_text(p) if p is not None else "",
@@ -553,7 +675,8 @@ class GroupRuntime:
                     chained_from: str = "",
                     reply_to_owner: bool = False,
                     mentioned: bool = False,
-                    force: bool = False) -> Optional[str]:
+                    force: bool = False,
+                    ignore_total: bool = False) -> Optional[str]:
         """让某个角色在群里说一句。返回说出去的内容（没说返回 None）。
 
         ★ 锁的粒度：`_gen_lock` 只护「生成 + 落库 + 复读判定」，**不含发送**。
@@ -571,7 +694,8 @@ class GroupRuntime:
         if not self.store.member(cid):
             return None                       # 已经不在群里了
         if not force:
-            ok, why = self.can_speak(cid, mention=mentioned)
+            ok, why = self.can_speak(cid, mention=mentioned,
+                                     ignore_total=ignore_total)
             if not ok:
                 print(f"[group:{self.gid}] {m.name} 不开口：{why}")
                 return None
@@ -591,9 +715,12 @@ class GroupRuntime:
             if not bubbles:
                 return None
             text = "\n".join(bubbles)
+            # ★ 情绪优先时不拦话题：他正在讲面试失败，谁提「面试」都不该被禁。
             why = self.dup_reason(text)
+            if not why and not self._in_comfort():
+                why = self.topic_ban_reason(text)
             if why:
-                print(f"[group:{self.gid}] {m.name} 复读被拦：{why}")
+                print(f"[group:{self.gid}] {m.name} 被拦：{why}")
                 return None
             if reply_to:
                 quoted = self.store.get_gmsg(int(reply_to))
@@ -735,20 +862,62 @@ class GroupRuntime:
         while len(self._mid_alias) > 300:
             self._mid_alias.pop(next(iter(self._mid_alias)))
 
+    def quoted_of(self, mid: str) -> Optional[Dict[str, Any]]:
+        """按 mid 取被引用消息的「昵称 + 摘要」—— 兼容**实时随机 id**。
+
+        我引用自己刚发的那条群消息时，客户端手里只有实时随机 id；库内 mid
+        是后来才生成的（`g<id>`），得靠 `_mid_alias` 才能对上。只按库内 mid
+        查会查不到，引用块就永远画不出来（用户实测报障）。
+        """
+        rid = str(mid or "").strip()
+        if not rid:
+            return None
+        if "-" in rid:                       # g119-2 → g119
+            head, _, tail = rid.rpartition("-")
+            if head and tail.isdigit():
+                rid = head
+        row = None
+        try:
+            row = self.store.find_gmsg(rid)
+        except Exception:  # noqa: BLE001
+            row = None
+        if not row and rid in self._mid_alias:
+            try:
+                row = self.store.find_gmsg(self._mid_alias[rid])
+            except Exception:  # noqa: BLE001
+                row = None
+        if not row:
+            return None
+        kind = str(row.get("kind") or "")
+        if kind == KIND_USER:
+            name = self.cfg.qq.server.owner_nickname
+        elif kind == KIND_SYSTEM:
+            name = "系统"
+        else:
+            name = str(row.get("sender_name") or "成员")
+        return {"message_id": str(row.get("mid") or rid), "name": name,
+                "text": str(row.get("text") or "")[:80].replace("\n", " ")}
+
     # ---------------- 每群可调的节奏参数 ----------------
     # 用户要的：群里那些「发言额度」不该只写死在 config.yaml 里，得像私聊的
     # 「热情/好感」滑杆一样能在界面上调。这里给一份**白名单**（key、中文名、
     # 类型、上下限、步长、单位）—— 前端照着渲染滑杆，后端照着校验，两边不会漂。
 
+    # ★ 上限刻意给得比推荐值宽：这些是「让用户往上拧」的旋钮，不是建议值。
+    #   用户反馈原来的天花板太低（每小时最多 60 条、一次最多 30 条）——
+    #   想把群聊调热闹一点根本调不上去。
     LIMIT_SPECS: List[Tuple[str, str, str, float, float, float, str]] = [
-        ("msgs_per_hour", "每群每小时最多几条", "int", 1, 60, 1, "条"),
-        ("daily_max_per_member", "每人每天最多几条", "int", 1, 40, 1, "条"),
-        ("ai_no_owner_max", "一轮里最多几条", "int", 1, 30, 1, "条"),
-        ("ai_chain_max", "连续接话上限", "int", 0, 10, 1, "条"),
-        ("responders", "我发言时几个人回", "int", 1, 10, 1, "人"),
-        ("bubbles_per_turn", "一次最多几条气泡", "int", 1, 9, 1, "条"),
-        ("min_gap_member_sec", "同一人两次发言间隔", "int", 0, 600, 10, "秒"),
+        ("msgs_per_hour", "每群每小时最多几条", "int", 1, 999, 1, "条"),
+        ("daily_max_total", "全群每天最多几条", "int", 20, 9999, 10, "条"),
+        ("daily_max_per_member", "每人每天最多几条", "int", 1, 999, 1, "条"),
+        ("ai_no_owner_max", "一轮里最多几条", "int", 1, 120, 1, "条"),
+        ("ai_chain_max", "连续接话上限", "int", 0, 40, 1, "条"),
+        ("responders", "我发言时几个人回", "int", 1, 20, 1, "人"),
+        ("bubbles_per_turn", "一次最多几条气泡", "int", 1, 20, 1, "条"),
+        ("min_gap_member_sec", "同一人两次发言间隔", "int", 0, 600, 5, "秒"),
         ("chain_reply_probability", "有人说完后别人接话的概率", "pct", 0, 100, 5, "%"),
+        ("ambient_gap_lo", "群自己起话头的最小间隔", "int", 2, 240, 1, "分"),
+        ("ambient_gap_hi", "群自己起话头的最大间隔", "int", 3, 480, 1, "分"),
         ("ambient_enabled", "让群自己起话头", "bool", 0, 1, 1, ""),
     ]
 
@@ -842,8 +1011,14 @@ class GroupRuntime:
         row = self.owner_say(show, segments=segments, reply_to=reply_to)
         # 我这条消息的实时 id（随机序号）和库内 mid 对不上，记一份对照，
         # 好让「引用我自己刚发的那条」也能解析出库内 id。
+        # ★ 必须**紧接着** owner_say 记下来：下面那步情绪打标是一次 LLM 调用
+        #   （几秒），排在它后面的话，我在这几秒里引用这条消息就查不到对照，
+        #   引用块会丢（实测：引用自己刚发的消息，历史里 reply_to=0）。
         self._remember_mid_alias(str(msg.message_id or ""),
                                  str(row.get("mid") or ""))
+        # ★ 再判一下我这条是不是「需要被接住」（倾诉/受挫）。后面挑人时的
+        #   提示词要整段换掉：不是「讲你自己」，而是「先接住他」。
+        comfort = await self._detect_comfort(show)
         self._owner_ts = time.time()
         self._roll_round(self._owner_ts)
         # 我开口 → 这是「新的一轮」的起点：重置连续接话计数
@@ -905,7 +1080,13 @@ class GroupRuntime:
             #  · 她在睡   —— 我直接说话把她吵醒了；真人被吵醒也会迷迷糊糊答一句
             #    （否则凌晨我发「哈喽」又会是一片安静 —— 那正是用户最烦的）
             bypass = called or over_cap or self._asleep(m)
-            if called:
+            if comfort:
+                # ★ 情绪优先：先接住我，别各说各的、别急着换话题。
+                hint = (f"{OWNER_LABEL}刚在群里说：{show[:80]}\n"
+                        "他现在心里不好受，需要有人接住。**这一轮先别讲你自己"
+                        "今天干嘛**：先关心他、替他抱不平、安慰他；不要说教、"
+                        "别急着给建议、别把话题转到你身上。")
+            elif called:
                 hint = (f"{OWNER_LABEL}刚才在群里叫了你"
                         "（@ 了你，或者提了你的名字），点名让你说话。")
             elif over_cap:
@@ -916,11 +1097,15 @@ class GroupRuntime:
                 #   以前这里 hint 为空，模型只看到最近 24 条群消息，就会自己
                 #   挑一句接 —— 于是出现「A 早说过的话被 B 现在才接」的错位感。
                 hint = (f"{OWNER_LABEL}刚才在群里说：{show[:60]}\n"
-                        "你接着这句说一句（回他，或者顺着这个话头聊点你自己的也行）。")
+                        "你回应他一句就行 —— 主要说说**你自己眼下在干嘛**，"
+                        "别复述他提到的那些具体东西，也别顺着那个话题往下扯。")
             tasks.append(asyncio.create_task(self._respond_later(
                 cid, random.uniform(float(lo), float(hi)),
                 hint=hint, reply_to=int(row["id"]), user_text=show,
-                mentioned=bypass, reply_to_owner=not called)))
+                mentioned=bypass, reply_to_owner=not called,
+                # ★ 回群主不受「全群今日总量」限制（否则说满 120 条后我说话
+                #   全员静默）；被点名时的其他额度闸门早已在 bypass 里放开。
+                ignore_total=True)))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.advance_cursors_except(picks)
@@ -939,7 +1124,8 @@ class GroupRuntime:
                              reply_to: int = 0, user_text: str = "",
                              mentioned: bool = False,
                              reply_to_owner: bool = False,
-                             chained_from: str = "") -> None:
+                             chained_from: str = "",
+                             ignore_total: bool = False) -> None:
         """过 `delay` 秒开口（每个回应者各自延迟，互不排队）。"""
         try:
             if delay > 0:
@@ -950,48 +1136,83 @@ class GroupRuntime:
             return
         await self.speak(cid, hint=hint, reply_to=reply_to,
                          user_text=user_text, reply_to_owner=reply_to_owner,
-                         mentioned=mentioned, chained_from=chained_from)
+                         mentioned=mentioned, chained_from=chained_from,
+                         ignore_total=ignore_total)
 
     # ---------------- 群聊场景（让她们意识到「我在群里说话」）----------------
 
     def _group_scene(self, m: Member, chained_from: str = "",
-                     reply_to_owner: bool = False) -> str:
+                     reply_to_owner: bool = False,
+                     avoid: Optional[List[str]] = None) -> str:
         """群发言专用的场景块。
 
-        用户反馈：群里的角色「没有意识到自己在群里说话」，还是自顾自地聊、
-        像在跟老师一对一。根因是群发言套用了私聊的扩展场景（「你主动开口找
-        对方」）—— 模型自然按私聊处理。这里给一段明确的场景替换掉它。
+        用户反馈：群里全在聊「米粉」，注意力死死咬住一个话题（对照真实群：
+        相邻两条共享话题词只有 10%，我们却有 58%）。原先这句笼统的
+        「别像接力赛」拦不住 —— 模型会照抄上下文里那个现成的名词。所以这里
+        改成**具体、可执行**的硬规矩，并把近期说烂的词直接点名。
+
+        另一条：真实群里单条中位只有 9~13 字，我们的却有 29 字 —— 一条里塞
+        三件事，等于给下一个人递三根话题钩子。所以「短、一条一事」也要写明。
         """
         others = [mm.name for mm in
                   (self._member_getter(c) for c in self.ai_member_ids())
                   if mm and mm.id != m.id]
         who = "、".join(others) if others else "（暂时只有你）"
+        comfort = self._in_comfort()
         lines = [
             "【场景】这是**群聊**，不是一对一私聊。",
             f"- 群里的人：{who}，还有「{OWNER_LABEL}」。你现在是「{m.name}」。",
+            f"- ⚠️ 你是「{m.name}」，**不是**群里其他任何人（也别拿别人的名字"
+            "自称，比如星野/小星）；你有你自己的名字和身份。",
             "- 你这句话是**当众**说的，群里每个人都看得到 —— 所以别把它讲成"
             "只有你们俩知道的事。",
-            "- 下面【最近的对话】是群里所有人说的话，每行开头的名字是说话的人。",
-            "- 群里说话比私聊更短更碎：**一句就够，最多两条**（实测真人在群里"
-            "一口气只有 1 条）。别把一句话拆成三条小作文。"
-            "不要说「你好」「在吗」这种开场。",
-            "- ⚠️ **别像接力赛那样句句都挂在上一条上**，也别每句都点某个人的名字"
-            "（那是开会点名，不是聊天）。多数时候就随口说自己眼下的事，偶尔"
-            "接一下别人、偶尔叫一下某人就行。也可以什么都不接，讲你自己的。",
+            "- 下面【最近的对话】只是**背景**，是别人在聊的事。你看一眼就行，"
+            "**不用接、也别复述里面说过的具体东西**。",
+            "- 群里说话比私聊更短更碎：**一句就够，一条只说一件事，每条不超过 "
+            "15 字**（真人群里单条中位才 9~13 字）。别把三件事塞进一条里。",
+        ]
+        if comfort:
+            # ★ 情绪优先：他刚说了件难受的事 —— 这时候「各说各的」是错的。
+            lines += [
+                f"- ★★ 「{OWNER_LABEL}」刚说了件让他不好受的事，**这几轮重点是"
+                "接住他**：先说一句心疼/抱不平/安慰，再聊别的。",
+                "- 不要说教、不要急着给解决方案、不要马上把话题转到你自己身上；"
+                "也别只回一个「嗯」就完了。",
+            ]
+        else:
+            lines += [
+                "- ★ **讲你自己眼下在干嘛**：你手头的事、你刚看到的、你的心情。"
+                "这才是群里大多数话的样子 —— 各说各的，偶尔才有人搭一句。",
+                "- ⚠️ **别像接力赛那样句句都挂在上一条上**，也别把上一条里出现的"
+                "**具体名词**（吃的、地点、排队、价格、某样东西）再搬出来一遍。",
+                "- ⚠️ 多数消息**不要以问句结尾**（真人群里只有 6% 的话是问句）；"
+                "想问也别每个话题都问，更别追着同一个问题反复问。",
+            ]
+        lines += [
+            "- 别点某个人的名字去点名（那是开会点名，不是聊天）；偶尔叫一下就行。",
             "- 说出来的话里**不要出现「群」「群里」这类词**（真人不会这么讲）。",
             "- 如果确实没什么想说的，只输出：[NO_MESSAGE]",
         ]
         if chained_from:
-            lines.append(f"- 现在接着群里「{chained_from}」刚说的那句往下聊。")
+            lines.append(f"- 群里「{chained_from}」刚说了一句。**你可以完全不接** "
+                         "—— 说说你自己眼下的事就行。")
         if reply_to_owner:
             lines.append(f"- 这段话主要是接「{OWNER_LABEL}」刚在群里说的那句。")
+        if avoid and not comfort:
+            lines.append(
+                "- 🚫 群里最近**反复提到、已经说烂**的词：" + "、".join(avoid[:8])
+                + " —— 这一轮**一个都别再出现**，换成你自己的事。")
         return "\n".join(lines)
 
     # ---------------- 群自己的节奏 ----------------
 
     def _ambient_gap(self) -> float:
-        lo, hi = (list(self.gcfg.ambient_gap_min or [8, 25]) + [8, 25])[:2]
-        return random.uniform(float(lo), float(hi)) * 60.0
+        base = (list(self.gcfg.ambient_gap_min or [8, 25]) + [8, 25])[:2]
+        lo = float(getattr(self.gcfg, "ambient_gap_lo", None) or base[0])
+        hi = float(getattr(self.gcfg, "ambient_gap_hi", None) or base[1])
+        if hi < lo:
+            lo, hi = hi, lo
+        return random.uniform(lo, hi) * 60.0
 
     # ---------------- 接话：让群里的话有人接 ----------------
     # 用户反馈：「A 说了话没人接，等我发消息 B 才突然接 A 的话」。
@@ -1051,10 +1272,16 @@ class GroupRuntime:
                 continue
             print(f"[group:{self.gid}] 接话：{self._name_of(cid)} 接 "
                   f"{self._name_of(speaker)} 的那句")
+            if self._in_comfort():
+                hint = ("老师刚说了件让他难受的事，群里正等着有人接住他 —— "
+                        "你接一句，先关心他/替他抱不平，别讲你自己今天干嘛。")
+            else:
+                hint = (f"群里「{self._name_of(speaker)}」刚说：{text[:60]}\n"
+                        "你不用接他这句，也不用提他说的东西 —— 说说**你自己"
+                        "眼下的事**就行（一句，别超过 15 字）。")
             tasks.append(asyncio.create_task(self._respond_later(
                 cid, 0.0 if k == 0 else random.uniform(4.0, 25.0),
-                hint=(f"群里「{self._name_of(speaker)}」刚说：{text[:60]}\n"
-                      "你接一句 —— 顺着聊，或者有你自己的想法就说。"),
+                hint=hint,
                 reply_to=int(last.get("id") or 0),
                 chained_from=self._name_of(speaker))))
         if tasks:

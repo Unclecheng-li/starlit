@@ -40,19 +40,37 @@ from .traits import (derive_autonomy, derive_conversation, get_traits,
                      trait_text)
 
 
-def _store_user_turns(store: Store, msg: IncomingMessage) -> None:
+def _store_user_turns(store: Store, msg: IncomingMessage,
+                      reply_mid: str = "") -> None:
     """按原始分条写用户消息（合并后的输入不能变成一条长历史）。"""
     raw = msg.raw or {}
     texts = raw.get("_merged_texts")
     times = raw.get("_merged_times")
     if isinstance(texts, list) and texts:
+        last_tid = 0
         for i, t in enumerate(texts):
             ts = None
             if isinstance(times, list) and i < len(times):
                 ts = float(times[i] or 0) or None
-            store.add_turn("user", str(t)[:400], ts=ts)
+            last_tid = store.add_turn("user", str(t)[:400], ts=ts)
+        if reply_mid and last_tid:
+            store.set_turn_reply(last_tid, reply_mid)
         return
-    store.add_turn("user", (msg.text or "[图片]")[:400])
+    tid = store.add_turn("user", (msg.text or "[图片]")[:400])
+    if reply_mid and tid:
+        store.set_turn_reply(tid, reply_mid)
+
+
+def _reply_mid_of(msg: IncomingMessage) -> str:
+    """这条消息引用了哪一条（reply 段的 id）。"""
+    raw = msg.raw or {}
+    for seg in (raw.get("message") or []):
+        if isinstance(seg, dict) and seg.get("type") == "reply":
+            d = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+            rid = str(d.get("id") or d.get("message_id") or "").strip()
+            if rid:
+                return rid
+    return str(raw.get("_reply_id") or "").strip()
 
 
 def _sticker_like(msg: IncomingMessage) -> bool:
@@ -310,6 +328,7 @@ class GuestRuntime:
             time_text=time_text,
             trait_text=relation,
             presence_text=self.presence_text,
+            self_name=self.char.name,
         )
         if analysis.get("intent"):
             self.conversation.conv.topic = str(analysis["intent"])
@@ -427,7 +446,7 @@ class GuestRuntime:
                 reply = ""
         if not reply:
             print(f"[guest:{self.char.name}] 本轮没有生成内容（用户消息已保留）")
-            _store_user_turns(self.store, msg)
+            _store_user_turns(self.store, msg, _reply_mid_of(msg))
             return
         bubbles = reply if isinstance(reply, list) else [reply]
         bubbles = [str(b).strip() for b in bubbles if str(b).strip()]
@@ -475,7 +494,7 @@ class GuestRuntime:
             except Exception as e:  # noqa: BLE001
                 print(f"[guest:{self.char.name}] 选表情包失败：{e!r}")
 
-        _store_user_turns(self.store, msg)
+        _store_user_turns(self.store, msg, _reply_mid_of(msg))
         # 注意：这里**不传 abort_check**。新增角色的回复本来就该以用户
         # 最新一条为准；如果代际检查误判，会把整批回复静默吞掉（实测
         # 用户看到「发了消息但对方一直不回」）。发送锁已经保证不交错。

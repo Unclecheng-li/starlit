@@ -1597,8 +1597,11 @@
       else if (seg.type === 'reply') continue;
       else if (seg.type === 'json') {
         const card = parseShareCard(seg);
-        parts.push(card ? `[分享] ${card.title}` : '[聊天记录]');
-      } else if (seg.type === 'forward') parts.push('[聊天记录]');
+        parts.push(card ? `[分享] ${card.title}` : '[分享]');
+      } else if (seg.type === 'forward') {
+        parts.push(String((seg.data && (seg.data.summary || seg.data.title))
+                          || '聊天记录'));
+      }
     }
     return parts.join('');
   }
@@ -1653,6 +1656,53 @@
       if (text) out.push({ name, text: text.replace(/\s+/g, ' ').slice(0, 60) });
     }
     return out;
+  }
+
+  // 从 get_forward_msg 的响应里取条目。兼容 data.messages[*]（Stapxs/NapCat）
+  // 与 data.message[*].data（Lagrange）两种形态。
+  function forwardItemsFromApi(data) {
+    const d = (data && data.data) || data || {};
+    let msgs = d.messages;
+    if (!Array.isArray(msgs)) {
+      msgs = Array.isArray(d.message)
+        ? d.message.map((n) => (n && n.data) || {}) : [];
+    }
+    const out = [];
+    for (const it of msgs) {
+      if (!it || typeof it !== 'object') continue;
+      const sender = it.sender || {};
+      const name = String(sender.card || sender.nickname
+                          || it.nickname || '某人');
+      const body = it.content || it.message || '';
+      let text = '';
+      if (typeof body === 'string') text = body;
+      else if (Array.isArray(body)) text = segsToText(body);
+      if (text) out.push({ name, text: text.replace(/\s+/g, ' ').slice(0, 80) });
+    }
+    return out;
+  }
+
+  // QQ 那种展开的「聊天记录」列表
+  function makeFwdBox(title, items) {
+    const box = document.createElement('div');
+    box.className = 'fwd-box';
+    const head = document.createElement('div');
+    head.className = 'fwd-head';
+    head.textContent = title || '聊天记录';
+    box.appendChild(head);
+    for (const it of items.slice(0, 30)) {
+      const line = document.createElement('div');
+      line.className = 'fwd-line';
+      const who = document.createElement('span');
+      who.className = 'fwd-who';
+      who.textContent = it.name;
+      const tx = document.createElement('span');
+      tx.className = 'fwd-text';
+      tx.textContent = it.text;
+      line.append(who, tx);
+      box.appendChild(line);
+    }
+    return box;
   }
 
   function makeShareCard(card) {
@@ -2219,35 +2269,43 @@
           bubble.appendChild(chip);
         }
       } else if (seg.type === 'forward') {
-        // 合并转发：有内嵌内容就把每一条画出来（QQ 也是展开成列表），
-        // 只有 id、内容没带过来时才退回提示。
+        // 合并转发：有内嵌内容就展开成列表（QQ 同款）；只有 id、内容在服务端
+        // 时，画成**可点**的卡片 —— 点一下调 get_forward_msg 取回来再展开。
+        // （原来是死占位「[聊天记录]」，用户实测「点不开」。）
+        const title = String((seg.data && (seg.data.title || seg.data.summary))
+                             || '聊天记录');
         const items = forwardItemsOf(seg);
         if (items.length) {
-          const box = document.createElement('div');
-          box.className = 'fwd-box';
-          const head = document.createElement('div');
-          head.className = 'fwd-head';
-          head.textContent = String((seg.data && (seg.data.title || seg.data.summary))
-                                    || '聊天记录');
-          box.appendChild(head);
-          for (const it of items.slice(0, 20)) {
-            const line = document.createElement('div');
-            line.className = 'fwd-line';
-            const who = document.createElement('span');
-            who.className = 'fwd-who';
-            who.textContent = it.name;
-            const tx = document.createElement('span');
-            tx.className = 'fwd-text';
-            tx.textContent = it.text;
-            line.append(who, tx);
-            box.appendChild(line);
-          }
           if (bubble.childNodes.length) bubble.appendChild(document.createElement('br'));
-          bubble.appendChild(box);
+          bubble.appendChild(makeFwdBox(title, items));
         } else {
-          const chip = document.createElement('span');
-          chip.className = 'face-chip';
-          chip.textContent = '[聊天记录]';
+          const fid = String((seg.data && (seg.data.id || seg.data.file)) || '');
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'face-chip fwd-chip';
+          chip.textContent = fid ? '聊天记录（点击查看）' : '聊天记录（内容不可用）';
+          if (fid) {
+            chip.addEventListener('click', async () => {
+              if (chip.dataset.loaded) return;
+              chip.textContent = '聊天记录（加载中…）';
+              try {
+                const res = await call('get_forward_msg', { id: fid }, 20000);
+                const got = forwardItemsFromApi(res);
+                if (got.length) {
+                  chip.dataset.loaded = '1';
+                  if (bubble.childNodes.length) {
+                    bubble.appendChild(document.createElement('br'));
+                  }
+                  bubble.appendChild(makeFwdBox(title, got));
+                  chip.remove();
+                } else {
+                  chip.textContent = '聊天记录（内容不可用）';
+                }
+              } catch (e) {
+                chip.textContent = '聊天记录（加载失败，点我再试）';
+              }
+            });
+          }
           bubble.appendChild(chip);
         }
       }
@@ -2327,6 +2385,20 @@
       av.title = state.bot.name;
       fillAvatar(av, state.bot.name, state.bot.id);
     }
+    // ★ 群里右键别人的头像 → 弹出成员菜单（第一项就是「@ ta」），
+    //   和右侧成员列表同一套菜单。自己的头像不弹（不能 @ 自己）。
+    av.addEventListener('contextmenu', (e) => {
+      if (!isGroup() || state.selectMode) return;
+      if (!sender || !sender.id) return;
+      const sid = String(sender.id);
+      if (sid === String(state.me.id) || isOwner(sid)
+          || String(sender.role || '') === 'system') return;
+      e.preventDefault();
+      e.stopPropagation();
+      openMemberMenu(e, { user_id: sid,
+                          nickname: sender.name || sid,
+                          role: sender.role || 'member' });
+    });
 
     const body = document.createElement('div');
     body.className = 'msg-body';
@@ -2597,12 +2669,14 @@
     updateSendBtn();
     // 群里 @ 的人转成 at 段一起发（后端靠 at 段判断「@ 了谁」）
     const segs = isGroup() ? composeSegs(text) : [{ type: 'text', data: { text } }];
-    // 引用回复：reply 段放在最前面，后端据此把 reply_to 落库
-    const quoted = (isGroup() && state.replyTo && state.replyTo.mid) ? state.replyTo : null;
+    // 引用回复：reply 段放在最前面，后端据此把 reply_to 落库。
+    // ★ 私聊也允许引用（QQ 私聊里同样能引用某条消息）——原来只在群里给这个入口。
+    const quoted = (state.replyTo && state.replyTo.mid) ? state.replyTo : null;
     if (quoted) segs.unshift({ type: 'reply', data: { id: quoted.mid } });
     // ★ QQ 的群引用会**顺手 @ 被引用的那个人**（对方收到提醒、也才知道你在回他）。
     //   这里照做：没手动 @ 过同一个人时，自动补一个 at 段（排在 reply 段之后）。
-    if (quoted) {
+    //   私聊不加 @（真人私聊不这么干）。
+    if (quoted && isGroup()) {
       const tgt = quoteAtTarget(quoted);
       const already = segs.some((s) => s.type === 'at'
         && String(s.data && s.data.qq) === String(tgt && tgt.id));
@@ -3303,12 +3377,13 @@
       if (b) b.classList.toggle('hidden', !on);
     };
     const inGroup = isGroup();
-    show('quote', inGroup && !msg.system && !msg.recalled);
     show('resend', msg.dir === 'out' && msg.status === 'failed');
     // 群消息撤回后端还没打通（群消息 id 是 g<id>，撤回只认私聊），先隐藏
     show('recall', !!msg.mid && !msg.recalled && !inGroup);
     // 私聊 → 可把这段对话分享/转发到某个群（用户要的「抖进群里」）
     show('shareGroup', !inGroup && !!state.groups.length);
+    // 引用回复：群、私聊都支持（有稳定 mid 就能引用）
+    show('quote', !msg.system && !msg.recalled && !!msg.mid);
     const rect = els.ctxMenu.getBoundingClientRect();
     const px = Math.min(x, window.innerWidth - rect.width - 8);
     const py = Math.min(y, window.innerHeight - rect.height - 8);

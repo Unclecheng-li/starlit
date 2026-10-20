@@ -86,8 +86,11 @@ class Traits:
 
     @property
     def delay_scale(self) -> float:
-        # 24 秒 = 1.0 倍；4 倍提速后高热情可以到 0.125
-        return max(0.12, min(6.0, self.reply_seconds / 24.0))
+        # 24 秒 = 1.0 倍。★ 2026-10-20 用户要求：热情的影响**再翻三倍**
+        #   （在这之前已经整体 ×4 提速过），所以这里再 ÷3。
+        #   下限从 0.12 放到 0.04，否则高热情角色全被夹在同一个值上、
+        #   「翻三倍」在她们身上等于没生效。
+        return max(0.04, min(6.0, self.reply_seconds / 24.0 / 3.0))
 
 
 # ---------------------------------------------------------------- 存储
@@ -149,24 +152,32 @@ def ensure_defaults(chars) -> None:
 
 def derive_autonomy(base: AutonomyConfig, t: Traits,
                     p: Optional[Presence] = None) -> AutonomyConfig:
-    sessions = t.sessions_per_day
+    # ★ 2026-10-20 用户要求：热情这一侧的影响**再翻三倍**（此前已经 ×4 过）。
+    #   做法统一为「频率 ×3、间隔 ÷3、顺延概率 ÷3」——只调一处，所有由热情
+    #   派生的量（主动条数、最小间隔、最长沉默、首次开口、顺延）一起变。
+    #   注意：这在「热情 0」那一端几乎不变（本来就没多少），差别主要体现在
+    #   中高热情的角色身上 —— 这正是用户要的「学生更主动来找我」。
+    TRIPLE = 3.0
+    sessions = t.sessions_per_day * TRIPLE
     # daily_max 是「主动消息条数」，一次主动通常 1~2 条；给一点余量
-    daily = 0 if t.enthusiasm <= 0 else max(1, min(24, round(sessions * 1.4)))
-    # 频率整体 ×4 后，间隔也同步缩短到 1/4，否则会被硬间隔卡住
+    daily = 0 if t.enthusiasm <= 0 else max(1, min(64, round(sessions * 1.4)))
+    # 频率×3 后，间隔也同步 ÷3，否则会被硬间隔卡住
     min_gap = int(round(_interp([
         (0, 180), (25, 60), (50, 30),
         (75, 22), (90, 15), (100, 8),
-    ], t.enthusiasm)))
+    ], t.enthusiasm) / TRIPLE))
+    min_gap = max(4, min_gap)          # 再短就成了刷屏，兜个底
     first_contact = int(round(_interp([
         (0, 180), (25, 60), (50, 22),
         (75, 12), (90, 8), (100, 4),
-    ], t.enthusiasm)))
+    ], t.enthusiasm) / TRIPLE))
+    first_contact = max(3, first_contact)
     # 兜底上限：无论抽到「远」档还是顺延，都不能睡过这个间隔。
-    # 按目标频率算平均间隔，再留 1.2 倍余量；最低 1 小时、最高 12 小时。
     max_gap = int(round(1440.0 / max(1.0, sessions) * 1.2))
-    max_gap = max(60, min(720, max_gap))
+    max_gap = max(30, min(720, max_gap))
     skip = _interp([(0, 0.55), (25, 0.35), (50, 0.20),
-                    (75, 0.10), (100, 0.04)], t.enthusiasm)
+                    (75, 0.10), (100, 0.04)], t.enthusiasm) / TRIPLE
+    skip = max(0.01, skip)
 
     e = t.enthusiasm / 100.0
     weights = [0.10 + 0.42 * e, 0.30 + 0.10 * e,
@@ -176,12 +187,11 @@ def derive_autonomy(base: AutonomyConfig, t: Traits,
     weights = [round(w / total, 4) for w in weights]
 
     a = t.affection / 100.0
-    # ★ 2026-10-19 用户要求：好感这一侧的倍率也放大 —— 越高越关心、
-    #   越愿意接住、越想了解你、越喜欢和你聊天。所以窗口/接话/追问/
-    #   聊天天数全部按好感拉开差距，而不是只微调。
+    # ★ 2026-10-20 用户要求：好感这一侧也翻三倍 —— 自主分享的额度 ×3、
+    #   分享阈值降得更低（更愿意把看到的东西讲给你），并抬高封顶。
     digest_share = 0 if t.affection < 20 else max(
-        1, min(4, round(1 + a * 3)))
-    digest_threshold = round(0.66 - 0.44 * a, 3)
+        1, min(12, round((1 + a * 3) * 3)))
+    digest_threshold = round(max(0.12, 0.66 - 0.44 * a * 3), 3)
 
     # ── 在线状态（用户的 QQ 式状态）叠在这之上 ──────────────────
     # 状态是乘数，不是另一套配置：热情决定「她本来多主动」，
@@ -193,8 +203,10 @@ def derive_autonomy(base: AutonomyConfig, t: Traits,
             daily = 0
             digest_share = 0
         else:
-            daily = max(1, min(40, round(daily * k)))
-            digest_share = max(0, min(6, round(digest_share * min(2.0, k))))
+            # ★ 封顶跟着「×3」一起抬高：原来的 40/6 会把高热情角色的三倍
+            #   直接夹回去（等于对最主动的那几个没生效）。
+            daily = max(1, min(200, round(daily * k)))
+            digest_share = max(0, min(12, round(digest_share * min(2.0, k))))
         # 频率高 → 间隔短；频率低 → 间隔长（离线/隐身只是降低，不是停）
         min_gap = max(3, int(round(min_gap / k)))
         first_contact = max(2, int(round(first_contact / k)))
@@ -228,21 +240,24 @@ def derive_conversation(base: ConversationConfig, t: Traits,
                         p: Optional[Presence] = None) -> ConversationConfig:
     a = t.affection / 100.0
     e = t.enthusiasm / 100.0
-    # ★ 好感这一侧的倍率也放大（2026-10-19 用户要求）：越高 → 越愿意接住你、
-    #   越想知道你的事、越喜欢和你聊 → 窗口更长、接话更密、追问更多。
-    active = int(round(8 + a * 72))                   # 8~80 分钟
-    follow_scale = 1.55 - 0.75 * a                    # 好感高 -> 更快接话
-    follow = [max(20, int(round(x * follow_scale)))
+    # ★ 2026-10-20 用户要求：好感这一侧**再翻三倍** —— 窗口更长、接话更密、
+    #   追问更多、一口气说得更多。和热情那边同一套「×3」语义。
+    TRIPLE = 3.0
+    active = int(round((8 + a * 72) * TRIPLE))        # 24~240 分钟
+    follow_scale = max(0.12, (1.55 - 0.75 * a) / TRIPLE)   # 好感高 -> 更快接话
+    follow = [max(15, int(round(x * follow_scale)))
               for x in (base.followup_delay_sec or [60, 180])]
-    max_follow = max(1, min(8, round(1 + a * 7)))
-    deep_follow = max(4, min(14, round(4 + a * 10)))
-    max_turns = max(2, min(10, round(2 + a * 8)))
-    # 「喜欢和你聊」：好感高时一口气说得更多（连发上限按气泡计）
-    burst = max(2, min(8, round(2 + e * 4 + a * 3)))
-    deep_burst = max(4, min(12, burst + 4))
-    # 「想了解你」：疏远 1 个探针，亲密 3 个
-    probes = 1 if t.affection < 40 else (2 if t.affection < 75 else 3)
-    reopen = [max(300, int(round(x * (1.25 - 0.55 * a))))
+    max_follow = max(1, min(12, round((1 + a * 7) * TRIPLE)))
+    deep_follow = max(4, min(16, round((4 + a * 10) * TRIPLE)))
+    max_turns = max(2, min(12, round((2 + a * 8) * TRIPLE)))
+    # 「喜欢和你聊」：好感高时一口气说得更多。★ 这一项**不 ×3** ——
+    #   一口气 20 多条气泡就是刷屏（也和既有的「普通 ≤9 条 / 深聊 ≤14 条」
+    #   硬上限冲突）。三倍体现在「多久来找你一次」，不是「一次说多少」。
+    burst = max(2, min(9, round(2 + e * 4 + a * 3)))
+    deep_burst = max(4, min(14, burst + 5))
+    # 「想了解你」：疏远 1 个探针，亲密 3 个 → 三倍后 3/6/9（封顶 6）
+    probes = min(6, (1 if t.affection < 40 else (2 if t.affection < 75 else 3)) * 3)
+    reopen = [max(240, int(round(x * (1.25 - 0.55 * a) / TRIPLE)))
               for x in (base.reopen_delay_sec or [1200, 5400])]
 
     # ── 在线状态：你方便的时候她可以多聊会儿，不方便就少接话 ──

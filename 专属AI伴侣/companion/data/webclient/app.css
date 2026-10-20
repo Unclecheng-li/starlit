@@ -1267,6 +1267,19 @@ html[data-custom-out="1"] {
 }
 .bubble .fwd-text { color: var(--text-1); }
 
+/* 只有 id、内容在服务端时的「聊天记录」卡片：可点，点开取回内容展开 */
+.bubble .fwd-chip {
+  border: 1px solid rgba(120, 145, 180, .28);
+  background: rgba(120, 145, 180, .12);
+  cursor: pointer;
+  height: auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  vertical-align: middle;
+  color: var(--text-1);
+}
+.bubble .fwd-chip:hover { background: rgba(120, 145, 180, .2); }
+
 .msg-meta {
   display: flex;
   align-items: center;
