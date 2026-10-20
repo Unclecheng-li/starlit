@@ -75,7 +75,8 @@ def _sticker_like(msg: IncomingMessage) -> bool:
 
 class GuestRuntime:
     def __init__(self, cfg: Config, char: Character, llm, sender: Sender,
-                 *, stickers=None, search=None, stealer=None):
+                 *, stickers=None, search=None, stealer=None,
+                 group_context_getter=None):
         self.cfg = cfg
         self.char = char
         self.llm = llm
@@ -83,6 +84,11 @@ class GuestRuntime:
         self.stickers = stickers
         self.search = search
         self.stealer = stealer
+        # ★ 私聊里也要知道「自己在群里说过什么、群里发生了什么」——
+        #   群消息只写进 events（不写 transcript，免得污染私聊摘要），
+        #   所以这里由 Companion 提供一段「她参与过的群聊近况」文本。
+        #   None 表示她还没进任何群（那就什么都不注入）。
+        self.group_context_getter = group_context_getter
 
         db = cfg.root / "data" / "characters" / char.id / "companion.db"
         self.store = Store(db)
@@ -349,6 +355,14 @@ class GuestRuntime:
         except Exception:  # noqa: BLE001
             sched_text = ""
 
+        # ★ 私聊 ⇄ 群聊记忆互通：把她参与过的群聊近况带进私聊上下文
+        group_context = ""
+        if self.group_context_getter:
+            try:
+                group_context = self.group_context_getter(self.char.id) or ""
+            except Exception:  # noqa: BLE001
+                group_context = ""
+
         reply = await express(
             self.llm,
             persona=self.char.persona,
@@ -375,6 +389,7 @@ class GuestRuntime:
             resume_hint=resume_hint,
             presence_text=self.presence_text,
             schedule_text=sched_text,
+            group_context=group_context,
         )
         if not reply:
             print(f"[guest:{self.char.name}] 表达通道返回空，重试一次")
@@ -405,6 +420,7 @@ class GuestRuntime:
                     resume_hint=resume_hint,
                     presence_text=self.presence_text,
                     schedule_text=sched_text,
+                    group_context=group_context,
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[guest:{self.char.name}] 重试也失败：{e!r}")

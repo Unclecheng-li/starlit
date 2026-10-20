@@ -586,6 +586,7 @@ async def express(
     presence_text: str = "",
     group_text: str = "",
     schedule_text: str = "",
+    group_context: str = "",
 ) -> Union[str, List[str]]:
     """写回复。
 
@@ -622,6 +623,12 @@ async def express(
         # 角色自己的作息（几点睡、几点起）。它是**先于话题**的一层：
         # 凌晨三点的人不该精神抖擞地聊游戏，刚起的人说话会慢半拍。
         blocks.append(schedule_text)
+    if group_context:
+        # ★ 私聊 ↔ 群聊记忆互通：群消息只写进 events（不写 transcript，
+        #   免得群消息窜进私聊窗口、污染会话摘要），所以这里由调用方把
+        #   「她在群里说过什么、群里最近发生了什么」拼好喂进来 ——
+        #   否则她在私聊里完全不知道自己在群里的身份与言行（实测）。
+        blocks.append(group_context)
     if analysis:
         blocks.append(
             "【这一轮的分析结论（只给你参考，不要照抄）】\n"

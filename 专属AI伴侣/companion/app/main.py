@@ -219,7 +219,8 @@ class Companion:
             return None
         g = GuestRuntime(self.cfg, char, self.llm, self.sender,
                          stickers=self.stickers, search=self.search,
-                         stealer=self.stealer)
+                         stealer=self.stealer,
+                         group_context_getter=self._group_context_for)
         self._guests[cid] = g
         if getattr(self, "_started", False):
             g.start()
@@ -449,6 +450,52 @@ class Companion:
             return sch.scene_text()
         except Exception:  # noqa: BLE001
             return ""
+
+    def _group_context_for(self, cid: str, limit: int = 10) -> str:
+        """「她参与过的群聊近况」——喂给**私聊**上下文，让两边记忆互通。
+
+        用户实测：在私聊里她完全不知道自己刚才在群里说过话。
+        根因是群消息只写进她自己的 `events`（刻意的：写 transcript 会让群消息
+        窜进私聊窗口、还会污染会话摘要），而私聊组装提示词时压根不读 events。
+
+        所以这里直接读**群库**（比 events 更全：连别人的发言都有），拼成一小段
+        「群里最近发生了什么」。注意只读、不改：私聊硬插群消息才是真污染。
+        """
+        cid = str(cid or "")
+        if not cid:
+            return ""
+        out: List[str] = []
+        try:
+            groups = self.groups.all()
+        except Exception:  # noqa: BLE001
+            return ""
+        for g in groups:
+            try:
+                st = self.groups.store_for(g.id)
+                if not st.member(cid):
+                    continue           # 她不在这个群
+                rows = st.recent_gmsgs(limit, include_revoked=False)
+            except Exception:  # noqa: BLE001
+                continue
+            lines: List[str] = []
+            for r in rows:
+                kind = str(r.get("kind") or "")
+                who = ("系统" if kind == "system"
+                       else ("我(群主)" if kind == "user"
+                             else str(r.get("sender_name") or "某人")))
+                txt = str(r.get("text") or "").replace("\n", " / ")[:50]
+                if txt:
+                    lines.append(f"{who}：{txt}")
+            if not lines:
+                continue
+            out.append(f"【你在群里「{g.name}」最近的对话】（群聊，不是私聊）\n"
+                       + "\n".join(lines[-limit:]))
+        if not out:
+            return ""
+        return ("\n\n".join(out) +
+                "\n（上面这些是你**在群里**说过、或者群里刚发生的事 —— 你都记得。"
+                "聊天时如果自然，可以提一句「我早上在群里说过…」，但别生硬复述；"
+                "也别把只有你和老师两个人知道的事拿到群里去说。）")
 
     def group_runtime_for(self, gid: str) -> Optional[GroupRuntime]:
         key = str(gid or "")
@@ -1898,6 +1945,8 @@ class Companion:
             presence_text=self.presence_text,
             # ★ 作息：凌晨三点被叫醒的人，回话不该精神抖擞（角色各有睡点）
             schedule_text=self._schedule_text_for(self.characters.primary),
+            # ★ 私聊 ⇄ 群聊记忆互通：星野也在群里，私聊时要记得自己在群里说过什么
+            group_context=self._group_context_for(self.characters.primary.id),
         )
         if not reply:
             return

@@ -3596,6 +3596,33 @@ async def test_group_files_and_quote() -> None:
               ch_meta._group_member_meta(gid, "999999")["level"] == 1
               and ch_meta._group_member_meta(gid, "999999")["role"] == "member",
               "")
+
+        # ── 私聊 ⇄ 群聊记忆互通：私聊上下文里能看到群里的近况 ──────
+        # 用户实测：她在私聊里完全不知道自己刚在群里说过话。
+        ctx = comp._group_context_for("3901000011")
+        check("群成员在私聊里能拿到「群里最近发生了什么」",
+              "最近的对话" in ctx and "文件测试群" in ctx, ctx[:90])
+        check("上下文里点明这是群聊、不是私聊", "群聊，不是私聊" in ctx, "")
+        check("提醒别把两人之间的事拿到群里说",
+              "只有你和老师两个人知道的事" in ctx, "")
+        check("不在群里的人拿不到（返回空串）",
+              comp._group_context_for("999999") == "", "")
+        check("空 id / 无群都不炸", comp._group_context_for("") == "", "")
+
+        # 传了就要真的进提示词（不能传了就丢）
+        captured: dict = {}
+
+        class CapLLM(MockLLM):
+            async def chat(self, messages, **kw):
+                captured["all"] = "\n".join(
+                    str(m.get("content") or "") for m in messages)
+                return await super().chat(messages, **kw)
+
+        from app.think import express as _express
+        await _express(CapLLM(), "人设", "", "状态", "记忆", ["我：在吗"], "在吗",
+                       group_context=ctx)
+        check("group_context 真的拼进了提示词",
+              "最近的对话" in captured.get("all", ""), captured.get("all", "")[:120])
     finally:
         await comp.stop()
 
