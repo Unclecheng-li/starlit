@@ -85,12 +85,30 @@ class Traits:
         return _interp(_REPLY_POINTS, self.enthusiasm)
 
     @property
+    def reply_seconds_effective(self) -> float:
+        """**真实生效**的回复秒数（面板上该显示这个）。
+
+        `reply_seconds` 是「参考真实聊天」的原始中位延迟；三倍提速后实际
+        是它的 1/3，而且**最快压到 1 秒**（再快就不像人了，200ms 秒回反而
+        假）。用户实测报障：「热情拉满面板还显示 3 秒 / 16.4 次」——
+        根因就是面板显示的是原始曲线，没算上倍率。
+        """
+        return max(1.0, self.reply_seconds / 3.0)
+
+    @property
     def delay_scale(self) -> float:
-        # 24 秒 = 1.0 倍。★ 2026-10-20 用户要求：热情的影响**再翻三倍**
-        #   （在这之前已经整体 ×4 提速过），所以这里再 ÷3。
-        #   下限从 0.12 放到 0.04，否则高热情角色全被夹在同一个值上、
-        #   「翻三倍」在她们身上等于没生效。
-        return max(0.04, min(6.0, self.reply_seconds / 24.0 / 3.0))
+        # 12 秒 = 真人第一响应中位延迟；倍率 = 目标秒数 / 12。
+        # 例：热情 100 → 1.0s → 0.083；热情 50 → 2.0s → 0.167。
+        return max(0.05, min(6.0, self.reply_seconds_effective / 12.0))
+
+    @property
+    def affection_multiplier(self) -> float:
+        """好感对**主动次数**的乘数（用户要求：高好感更黏人）。
+
+        好感 0 → ×0.7（还是朋友，但不会太缠人）；好感 100 → ×1.6。
+        和热情叠乘：热情决定「她本来多主动」，好感决定「她多黏你」。
+        """
+        return 0.7 + (self.affection / 100.0) * 0.9
 
 
 # ---------------------------------------------------------------- 存储
@@ -158,9 +176,11 @@ def derive_autonomy(base: AutonomyConfig, t: Traits,
     #   注意：这在「热情 0」那一端几乎不变（本来就没多少），差别主要体现在
     #   中高热情的角色身上 —— 这正是用户要的「学生更主动来找我」。
     TRIPLE = 3.0
-    sessions = t.sessions_per_day * TRIPLE
-    # daily_max 是「主动消息条数」，一次主动通常 1~2 条；给一点余量
-    daily = 0 if t.enthusiasm <= 0 else max(1, min(64, round(sessions * 1.4)))
+    # ★ 好感也叠一个乘数（用户要求「高好感更黏人」）：×0.7 ~ ×1.6。
+    sessions = t.sessions_per_day * TRIPLE * t.affection_multiplier
+    # daily_max 是「主动消息条数」；上半部分（热情）决定基准，好感再叠黏人度。
+    # 用户要求上限抬到 128。
+    daily = 0 if t.enthusiasm <= 0 else max(1, min(128, round(sessions * 1.4)))
     # 频率×3 后，间隔也同步 ÷3，否则会被硬间隔卡住
     min_gap = int(round(_interp([
         (0, 180), (25, 60), (50, 30),
@@ -247,14 +267,14 @@ def derive_conversation(base: ConversationConfig, t: Traits,
     follow_scale = max(0.12, (1.55 - 0.75 * a) / TRIPLE)   # 好感高 -> 更快接话
     follow = [max(15, int(round(x * follow_scale)))
               for x in (base.followup_delay_sec or [60, 180])]
-    max_follow = max(1, min(12, round((1 + a * 7) * TRIPLE)))
-    deep_follow = max(4, min(16, round((4 + a * 10) * TRIPLE)))
-    max_turns = max(2, min(12, round((2 + a * 8) * TRIPLE)))
+    max_follow = max(1, min(24, round((1 + a * 7) * TRIPLE)))
+    deep_follow = max(4, min(32, round((4 + a * 10) * TRIPLE)))
+    max_turns = max(2, min(24, round((2 + a * 8) * TRIPLE)))
     # 「喜欢和你聊」：好感高时一口气说得更多。★ 这一项**不 ×3** ——
     #   一口气 20 多条气泡就是刷屏（也和既有的「普通 ≤9 条 / 深聊 ≤14 条」
     #   硬上限冲突）。三倍体现在「多久来找你一次」，不是「一次说多少」。
-    burst = max(2, min(9, round(2 + e * 4 + a * 3)))
-    deep_burst = max(4, min(14, burst + 5))
+    burst = max(2, min(12, round(2 + e * 4 + a * 4)))
+    deep_burst = max(4, min(18, burst + 6))
     # 「想了解你」：疏远 1 个探针，亲密 3 个 → 三倍后 3/6/9（封顶 6）
     probes = min(6, (1 if t.affection < 40 else (2 if t.affection < 75 else 3)) * 3)
     reopen = [max(240, int(round(x * (1.25 - 0.55 * a) / TRIPLE)))
@@ -268,8 +288,10 @@ def derive_conversation(base: ConversationConfig, t: Traits,
         # 补话的「想起一句」间隔：想被找时更短
         wait = max(0.5, min(3.0, 1.0 / fs))
         follow = [max(20, int(round(x * wait))) for x in follow]
-        max_follow = max(1, min(8, int(round(max_follow * fs))))
-        max_turns = max(2, min(10, int(round(max_turns * fs))))
+        # ★ 上限必须和上面同一档（24）：这里留旧的 8/10 会把好感 ×3 的效果
+        #   原样夹回去，面板算出 21、实际却只有 8（用户实测「调了好感没变化」）。
+        max_follow = max(1, min(24, int(round(max_follow * fs))))
+        max_turns = max(2, min(24, int(round(max_turns * fs))))
         if p.silent:
             # 请勿打扰：不追话，不自言自语
             active = min(active, 6)
@@ -342,15 +364,50 @@ def trait_text(t: Traits) -> str:
 
 
 def trait_preview(t: Traits) -> str:
-    return (f"参考真实聊天：主动约 {t.sessions_per_day:.1f} 次/天 · "
-            f"回复约 {int(round(t.reply_seconds))} 秒")
+    """面板上显示的那行「参考」文案 —— **必须是真实生效值**。
+
+    ★ 原来这里打印 `sessions_per_day` / `reply_seconds`（原始曲线，没算倍率），
+    于是用户把热情拉满看到的还是「16.4 次/天 · 3 秒」，而实际跑的是
+    「64 条/天 · 1 秒」—— 面板在骗人，用户自然觉得「三倍没生效」。
+    """
+    daily = round(t.sessions_per_day * 3.0 * t.affection_multiplier * 1.4)
+    daily = max(1, min(128, daily))
+    return (f"实际生效：主动约 {daily} 条/天 · "
+            f"回复约 {t.reply_seconds_effective:.0f} 秒")
 
 
-def traits_payload(peer_id: str, name: str = "") -> Dict[str, Any]:
+def traits_detail(t: Traits, base_auto=None, base_conv=None,
+                  presence=None) -> Dict[str, Any]:
+    """面板用的派生值（滑杆旁边直接显示，省得靠猜）。"""
+    try:
+        a = derive_autonomy(base_auto or AutonomyConfig(), t, presence)
+        c = derive_conversation(base_conv or ConversationConfig(), t, presence)
+    except Exception:  # noqa: BLE001
+        return {}
+    return {
+        "daily_max": int(a.daily_max),
+        "reply_seconds": round(t.reply_seconds_effective, 1),
+        "min_gap_min": int(a.min_gap_min),
+        "max_gap_min": int(a.max_gap_min),
+        "first_contact_min": int(a.first_contact_max_min),
+        "skip_probability": round(float(a.skip_probability), 3),
+        "active_window_min": int(c.active_window_min),
+        "max_followups": int(c.max_followups_per_topic),
+        "max_turns": int(c.max_bot_turns_without_reply),
+        "max_burst": int(c.max_burst_bubbles),
+        "digest_share": int(a.digest_max_share_per_day),
+        "affection_multiplier": round(t.affection_multiplier, 2),
+    }
+
+
+def traits_payload(peer_id: str, name: str = "", *,
+                   base_auto=None, base_conv=None,
+                   presence=None) -> Dict[str, Any]:
     t = get_traits(peer_id, name)
     return {
         "peer_id": str(peer_id),
         "enthusiasm": t.enthusiasm,
         "affection": t.affection,
         "preview": trait_preview(t),
+        "detail": traits_detail(t, base_auto, base_conv, presence),
     }

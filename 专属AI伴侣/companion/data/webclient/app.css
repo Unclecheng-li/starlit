@@ -2701,6 +2701,18 @@ html[data-theme="dark"] .group-avatar {
 .bubble .at-chip:hover { background: transparent; }
 .msg-row.out .bubble .at-chip { color: inherit; }
 
+/* 关系参数：滑杆下方的「真实生效值」明细 */
+.trait-detail {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(120, 145, 180, .08);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-line;
+}
+
 /* ---------- 群右侧面板（群公告 + 群聊成员） ---------- */
 .group-side {
   flex: 0 0 268px;

@@ -177,6 +177,7 @@
     csAffection: $('#csAffection'),
     csAffectionVal: $('#csAffectionVal'),
     csTraitPreview: $('#csTraitPreview'),
+    csTraitDetail: $('#csTraitDetail'),
     csTraitSave: $('#csTraitSave'),
 
     avatarMask: $('#avatarMask'),
@@ -5262,12 +5263,33 @@
 
   function updateTraitPreview() {
     const e = Number(els.csEnthusiasm.value);
+    const af = Number(els.csAffection.value);
     els.csEnthusiasmVal.textContent = String(e);
-    els.csAffectionVal.textContent = String(els.csAffection.value);
+    els.csAffectionVal.textContent = String(af);
+    // ★ 显示**真实生效值**，必须和 traits.py 的派生算法一致：
+    //   主动条数 = 曲线 ×3(热情) × (0.7 + 好感/100*0.9) × 1.4，封顶 128
+    //   回复秒数 = 原始曲线 /3，最快压到 1 秒
     const sessions = traitInterp(TRAIT_SESSION_POINTS, e);
-    const reply = traitInterp(TRAIT_REPLY_POINTS, e);
+    const affMult = 0.7 + (af / 100) * 0.9;
+    const daily = Math.max(1, Math.min(128,
+      Math.round(sessions * 3 * affMult * 1.4)));
+    const reply = Math.max(1, traitInterp(TRAIT_REPLY_POINTS, e) / 3);
     els.csTraitPreview.textContent =
-      `参考真实聊天：主动约 ${sessions.toFixed(1)} 次/天 · 回复约 ${Math.round(reply)} 秒`;
+      `实际生效：主动约 ${daily} 条/天 · 回复约 ${reply.toFixed(1)} 秒`;
+    if (els.csTraitDetail) {
+      const active = Math.round((8 + (af / 100) * 72) * 3);
+      const minGap = Math.max(4, Math.round(
+        traitInterp([[0, 180], [25, 60], [50, 30], [75, 22], [90, 15], [100, 8]], e) / 3));
+      const maxGap = Math.max(30, Math.min(720,
+        Math.round(1440 / Math.max(1, sessions * 3 * affMult) * 1.2)));
+      const follow = Math.max(1, Math.min(24,
+        Math.round((1 + (af / 100) * 7) * 3)));
+      const burst = Math.max(2, Math.min(12,
+        Math.round(2 + (e / 100) * 4 + (af / 100) * 4)));
+      els.csTraitDetail.textContent =
+        `两次主动间隔 ≥ ${minGap} 分钟 · 最长沉默 ${maxGap} 分钟\n`
+        + `接话窗口 ${active} 分钟 · 每话题最多接 ${follow} 次 · 一次最多 ${burst} 条`;
+    }
   }
 
   async function loadTraits() {

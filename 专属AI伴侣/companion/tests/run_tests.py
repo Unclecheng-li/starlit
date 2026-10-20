@@ -2721,8 +2721,15 @@ def test_traits() -> None:
         # ★ 2026-10-20：热情/好感的影响再 ×3
         from app.config import AutonomyConfig as _AC
         mid_auto = T.derive_autonomy(_AC(), mid)
-        check("★ 热情 ×3：每日主动额度抬高（热情 50 → 21 次/天）",
-              mid_auto.daily_max == 21, str(mid_auto.daily_max))
+        check("★ 热情 ×3 + 好感黏人乘数：每日主动额度（热情50/好感60 → 26 条/天）",
+              mid_auto.daily_max == 26, str(mid_auto.daily_max))
+        check("★ 好感也影响主动次数（好感越高越黏人）",
+              T.derive_autonomy(_AC(), T.Traits(enthusiasm=50, affection=100)).daily_max
+              > T.derive_autonomy(_AC(), T.Traits(enthusiasm=50, affection=0)).daily_max,
+              "")
+        check("★ 回复最快压到 1 秒（热情 100）",
+              abs(T.Traits(enthusiasm=100).reply_seconds_effective - 1.0) < 1e-6,
+              str(T.Traits(enthusiasm=100).reply_seconds_effective))
         check("★ 热情 ×3：两次主动最小间隔 ÷3（热情 50 → 10 分钟）",
               mid_auto.min_gap_min == 10, str(mid_auto.min_gap_min))
         check("★ 热情 ×3：顺延概率 ÷3（热情 50 → 约 0.067）",
@@ -2778,8 +2785,10 @@ def test_traits() -> None:
               text[:60])
         check("提示词要求不要暴露数值",
               "不要把数值说出来" in text, text[:60])
-        check("预览引用真实聊天频率",
-              "参考真实聊天" in T.trait_preview(hot), T.trait_preview(hot))
+        check("★ 预览显示真实生效值（不再只印原始曲线）",
+              "实际生效" in T.trait_preview(hot)
+              and "条/天" in T.trait_preview(hot),
+              T.trait_preview(hot))
 
         T.save_traits("42", 12, 88)
         saved = T.get_traits("42")

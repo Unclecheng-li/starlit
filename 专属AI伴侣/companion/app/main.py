@@ -279,7 +279,11 @@ class Companion:
         char = self.characters.get(cid)
         if not char:
             raise ValueError("没有这个角色")
-        return traits_payload(cid, char.name)
+        # 带上「真实派生值」：面板直接显示每日条数/窗口/间隔，不用靠猜
+        return traits_payload(cid, char.name,
+                              base_auto=self.base_autonomy,
+                              base_conv=self.base_conversation,
+                              presence=self.presence)
 
     def set_character_traits(self, peer_id: str,
                              enthusiasm, affection) -> dict:
@@ -295,8 +299,11 @@ class Companion:
             if g:
                 g.apply_traits(t)
         print(f"[traits] {char.name}：热情 {t.enthusiasm} / 好感 {t.affection}"
-              f"（{trait_text(t).splitlines()[0]}）")
-        return traits_payload(cid, char.name)
+              f"（{trait_preview(t)}）")
+        return traits_payload(cid, char.name,
+                              base_auto=self.base_autonomy,
+                              base_conv=self.base_conversation,
+                              presence=self.presence)
 
     def _refresh_primary_config(self) -> None:
         """用当前的热情 + 在线状态重算星野的派生配置，并立即重排主动消息。
