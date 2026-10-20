@@ -275,9 +275,13 @@ class OneBotServerChannel:
         if "websocket" in (request.headers.get("Upgrade") or "").lower():
             return await self._ws_handler(request)
         if self.webapp_dir and (self.webapp_dir / "index.html").is_file():
+            # ★ no-store：只写 no-cache 时浏览器仍可能拿本地副本（配合旧 Service
+            #   Worker 更糟）。实测改完 app.js/app.css 后，页面依旧在跑几天前的
+            #   ?v= 版本 —— 「修了但不生效」的一大来源。
             return web.FileResponse(
                 self.webapp_dir / "index.html",
-                headers={"Cache-Control": "no-cache"})
+                headers={"Cache-Control": "no-store, must-revalidate",
+                         "Pragma": "no-cache", "Expires": "0"})
         return web.Response(text=(
             "<h3>vol onebot-server</h3>"
             "<p>聊天页面未部署（companion/data/webclient 不存在）。</p>"
@@ -290,7 +294,7 @@ class OneBotServerChannel:
             return web.Response(status=404)
         return web.FileResponse(
             self.legacy_dir / "index.html",
-            headers={"Cache-Control": "no-cache"})
+            headers={"Cache-Control": "no-store, must-revalidate"})
 
     # ---------------- 鉴权 ----------------
     def _auth_ok(self, request: web.Request) -> bool:

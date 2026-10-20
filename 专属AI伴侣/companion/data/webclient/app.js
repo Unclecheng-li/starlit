@@ -2255,7 +2255,8 @@
       } else if (seg.type === 'at') {
         const chip = document.createElement('span');
         chip.className = 'face-chip at-chip';
-        chip.textContent = atLabel(d.qq);
+        // 尾巴留一个空格：@ 后面紧跟正文时不该粘成「@橘雪莉雪梨怎么…」
+        chip.textContent = atLabel(d.qq) + ' ';
         bubble.appendChild(chip);
       } else if (seg.type === 'record') {
         const chip = document.createElement('span');
@@ -3985,7 +3986,13 @@
     if (s === 'all' || s === '-1' || s === '0') return '@全体成员';
     const d = curGroupDetail();
     const m = ((d && d.members) || []).find((x) => String(x.user_id) === s);
-    return '@' + (m ? (m.nickname || s) : s);
+    if (m && m.nickname) return '@' + m.nickname;
+    // ★ 群详情还没拉到时不要显示「@3901000018」这种 QQ 号 —— 先用角色名兜底
+    //   （否则历史消息一进群就是「@一串数字」，用户会以为 @ 坏了）。
+    const c = (state.characters || []).find((x) => String(x.id) === s);
+    if (c && c.name) return '@' + c.name;
+    if (state.me && String(state.me.id) === s) return '@' + state.me.name;
+    return '@' + s;
   }
 
   // 发送时把待发的 at 段拼到最前面（后端靠 at 段判断「@ 了谁」）
