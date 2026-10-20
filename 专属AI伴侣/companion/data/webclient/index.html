@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#0099ff">
   <link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb3d9'/%3E%3Cstop offset='.55' stop-color='%23a48bff'/%3E%3Cstop offset='1' stop-color='%236fa8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M13 21a9 9 0 0 1 9-9h20a9 9 0 0 1 9 9v12a9 9 0 0 1-9 9H31l-9 8v-8a9 9 0 0 1-9-9Z' fill='%23fff' opacity='.95'/%3E%3Cpath d='m32 18 2.7 6.1 6.6.7-4.9 4.4 1.4 6.4L32 32.3l-5.8 3.3 1.4-6.4-4.9-4.4 6.6-.7Z' fill='%237a5cff'/%3E%3Ccircle cx='49' cy='15' r='2.4' fill='%23fff'/%3E%3C/svg%3E">
-  <title>星野 · vol</title>
-  <link rel="stylesheet" href="./app.css?v=20261018c">
+  <title>starlit · vol</title>
+  <link rel="stylesheet" href="./app.css?v=20261019p">
 </head>
 <body>
 
@@ -100,14 +100,84 @@
   <symbol id="i-check" viewBox="0 0 24 24">
     <path d="m5 12.5 4.5 4.5L19 7"/>
   </symbol>
+  <!-- 在线状态图标（平面线性，和上面的图标库同一套语言）-->
+  <symbol id="i-p-online" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="7.5"/>
+    <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-p-qme" viewBox="0 0 24 24">
+    <path d="M20 11.4c0 3.9-3.6 7.1-8 7.1-.9 0-1.8-.1-2.6-.4L5 20l1.2-3.9A6.8 6.8 0 0 1 4 11.4c0-3.9 3.6-7.1 8-7.1s8 3.2 8 7.1Z"/>
+    <path d="M8.6 11.4h.01M12 11.4h.01M15.4 11.4h.01"/>
+  </symbol>
+  <symbol id="i-p-away" viewBox="0 0 24 24">
+    <path d="M20 14.6A7.6 7.6 0 0 1 9.4 4 7.8 7.8 0 1 0 20 14.6Z"/>
+  </symbol>
+  <symbol id="i-p-busy" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="7.5"/>
+    <path d="M8.5 12h7"/>
+  </symbol>
+  <symbol id="i-p-dnd" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="7.5"/>
+    <path d="m7.2 7.2 9.6 9.6"/>
+  </symbol>
+  <symbol id="i-p-invisible" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="7.5" stroke-dasharray="3.4 3.4"/>
+  </symbol>
+  <symbol id="i-p-offline" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="7.5"/>
+  </symbol>
+  <!-- 群聊相关图标（同一套平面线性语言）-->
+  <symbol id="i-group" viewBox="0 0 24 24">
+    <circle cx="9" cy="9" r="3.2"/>
+    <path d="M3.2 19c.5-3.2 2.9-5 5.8-5s5.3 1.8 5.8 5"/>
+    <path d="M16 6.4a3 3 0 0 1 0 5.9"/>
+    <path d="M17.4 14.3c2 .6 3.4 2.2 3.7 4.7"/>
+  </symbol>
+  <symbol id="i-at" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="3.8"/>
+    <path d="M15.8 12v1.5a2.3 2.3 0 0 0 4.6 0V12a8.4 8.4 0 1 0-3.4 6.7"/>
+  </symbol>
+  <symbol id="i-megaphone" viewBox="0 0 24 24">
+    <path d="M4 9.5v5a1.6 1.6 0 0 0 1.6 1.6h2L16 20V4L7.6 7.9h-2A1.6 1.6 0 0 0 4 9.5Z"/>
+    <path d="M7.6 16v4.2"/>
+  </symbol>
+  <symbol id="i-crown" viewBox="0 0 24 24">
+    <path d="M3.6 7.6 7 11.2l3-5.6 2 2.6 2-2.6 3 5.6 3.4-3.6L19 18H5L3.6 7.6Z"/>
+  </symbol>
+  <symbol id="i-user-add" viewBox="0 0 24 24">
+    <circle cx="10" cy="8.5" r="3.4"/>
+    <path d="M3.5 19.5c.6-3.4 3.2-5.3 6.5-5.3 1.4 0 2.6.4 3.7 1.1"/>
+    <path d="M17.5 13.5v6M14.5 16.5h6"/>
+  </symbol>
+  <symbol id="i-user-minus" viewBox="0 0 24 24">
+    <circle cx="10" cy="8.5" r="3.4"/>
+    <path d="M3.5 19.5c.6-3.4 3.2-5.3 6.5-5.3 1.4 0 2.6.4 3.7 1.1"/>
+    <path d="M14.5 16.5h6"/>
+  </symbol>
+  <symbol id="i-quote" viewBox="0 0 24 24">
+    <path d="M4 6.5h16M4 12h9M4 17.5h12"/>
+    <path d="m17 11.5 3 2.5-3 2.5"/>
+  </symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24">
+    <path d="M3.5 7.2A2.7 2.7 0 0 1 6.2 4.5h3.1l1.8 2.2h6.7A2.7 2.7 0 0 1 20.5 9.4v7.9A2.7 2.7 0 0 1 17.8 20H6.2A2.7 2.7 0 0 1 3.5 17.3V7.2Z"/>
+  </symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24">
+    <path d="M12 4v11M8 8l4-4 4 4"/>
+    <path d="M4.5 15v3A2.5 2.5 0 0 0 7 20.5h10A2.5 2.5 0 0 0 19.5 18v-3"/>
+  </symbol>
+  <symbol id="i-download" viewBox="0 0 24 24">
+    <path d="M12 20V9M8 16l4 4 4-4"/>
+    <path d="M4.5 9V6A2.5 2.5 0 0 1 7 3.5h10A2.5 2.5 0 0 1 19.5 6v3"/>
+  </symbol>
 </svg>
 
 <!-- ================= 连接页 ================= -->
 <section id="connectView" class="connect">
+  <div class="connect-bg" id="connectBg"></div>
   <div class="connect-sky"><i></i><i></i><i></i></div>
   <div class="connect-card">
-    <div class="brand-avatar"><span>星</span><em></em></div>
-    <h1>星野</h1>
+    <div class="brand-avatar" id="brandAvatar"><span>我</span><i class="brand-dot presence-dot"></i></div>
+    <h1>starlit</h1>
     <p class="brand-sub">vol · 只属于你的 AI 伙伴</p>
     <div class="connect-state" id="connectState">
       <span class="pulse"></span><span id="connectStateText">正在连接…</span>
@@ -121,14 +191,20 @@
       </div>
     </div>
     <p class="connect-tip" id="connectTip">请通过 vol 启动后的地址打开本页面（http://127.0.0.1:8080/）</p>
+    <button class="connect-bg-btn" id="connectBgPick" type="button" title="换一张登录背景">
+      <svg><use href="#i-image"/></svg><span>更换背景</span>
+    </button>
   </div>
+  <input type="file" id="connectBgInput" accept="image/*" hidden>
 </section>
 
 <!-- ================= 主界面 ================= -->
 <div class="app hidden" id="appView">
   <!-- 左侧功能栏 -->
   <aside class="rail">
-    <div class="rail-avatar" id="railAvatar" title="我">我</div>
+    <div class="rail-avatar" id="railAvatar" title="我（在线）">
+      <span>我</span><i class="presence-dot" id="railDot"></i>
+    </div>
     <nav class="rail-nav">
       <button class="rail-btn active" data-tip="消息" aria-label="消息">
         <svg><use href="#i-chat"/></svg>
@@ -155,7 +231,9 @@
         <div class="avatar mh-avatar" id="mobileAvatar"><span>我</span></div>
         <div class="mh-info">
           <div class="mh-name" id="mobileName">我</div>
-          <div class="mh-status"><i></i><span id="mobileStatus">在线</span></div>
+          <button class="mh-status" id="mobilePresence" type="button" aria-label="切换在线状态">
+            <i id="mobileDot"></i><span id="mobileStatus">在线</span>
+          </button>
         </div>
         <button class="mh-plus" id="mobilePlus" aria-label="更多">
           <svg><use href="#i-plus"/></svg>
@@ -163,7 +241,13 @@
       </div>
       <div class="me-line">
         <span class="me-name" id="meName">我</span>
-        <span class="conn-chip" id="connChip"><i></i><span>连接中</span></span>
+        <div class="me-meta">
+          <button class="presence-chip" id="presenceChip" type="button"
+                  aria-label="切换在线状态" title="在线状态">
+            <svg><use href="#i-p-online"/></svg><span id="presenceChipText">在线</span>
+          </button>
+          <span class="conn-chip" id="connChip"><i></i><span>连接中</span></span>
+        </div>
         <div class="mobile-tools">
           <button class="icon-btn" id="mobileTheme" title="切换主题" aria-label="切换主题">
             <svg class="ic-moon"><use href="#i-moon"/></svg>
@@ -188,10 +272,12 @@
 
   <!-- 聊天区 -->
   <main class="chat-pane" id="chatPane">
+   <div class="chat-main" id="chatMain">
     <header class="chat-head">
       <button class="icon-btn back-btn" id="backBtn" aria-label="返回">
         <svg><use href="#i-back"/></svg>
       </button>
+      <div class="avatar chat-avatar group-avatar hidden" id="chatAvatar"><span>群</span></div>
       <div class="chat-title">
         <div class="name-row">
           <span id="chatName">星野</span>
@@ -200,6 +286,12 @@
         <div class="sub-row" id="chatSub">连接中…</div>
       </div>
       <div class="chat-actions">
+        <button class="icon-btn hidden" id="btnGroupAt" title="@全体成员" aria-label="@全体成员">
+          <svg><use href="#i-at"/></svg>
+        </button>
+        <button class="icon-btn hidden" id="btnGroupSet" title="群设置" aria-label="群设置">
+          <svg><use href="#i-group"/></svg>
+        </button>
         <button class="icon-btn" id="btnChatStyle" title="聊天设置" aria-label="聊天设置">
           <svg><use href="#i-palette"/></svg>
         </button>
@@ -259,6 +351,15 @@
     </div>
 
     <div class="composer" id="composer">
+      <div class="quote-bar hidden" id="quoteBar">
+        <div class="qb-body">
+          <span class="qb-name" id="qbName"></span>
+          <span class="qb-text" id="qbText"></span>
+        </div>
+        <button class="icon-btn qb-close" id="qbClose" aria-label="取消引用">
+          <svg><use href="#i-close"/></svg>
+        </button>
+      </div>
       <div class="composer-box">
         <div class="composer-row">
           <textarea id="input" rows="1" maxlength="4000" placeholder="和星野说点什么…"></textarea>
@@ -320,6 +421,59 @@
     </div>
 
     <div class="drop-mask hidden" id="dropMask"><div>松手发送图片</div></div>
+   </div>
+
+    <!-- 群右侧面板：入群申请 + 群公告 + 群聊成员（参考 QQ） -->
+    <aside class="group-side hidden" id="groupSide">
+      <div class="gs-head">
+        <div class="avatar group-avatar gs-avatar" id="gsAvatar"><span>群</span></div>
+        <div class="gs-head-info">
+          <strong id="gsName">群聊</strong>
+          <span id="gsCount">0 人</span>
+        </div>
+        <button class="icon-btn" id="gsClose" title="收起面板" aria-label="收起面板">
+          <svg><use href="#i-close"/></svg>
+        </button>
+      </div>
+      <div class="gs-body">
+        <section class="gs-card hidden" id="gsRequestCard">
+          <div class="gs-card-head">
+            <span><svg class="gs-ic"><use href="#i-user-add"/></svg>入群申请 <em id="gsRequestCount">0</em></span>
+          </div>
+          <div class="gs-requests" id="gsRequests"></div>
+        </section>
+        <section class="gs-card">
+          <div class="gs-card-head">
+            <span><svg class="gs-ic"><use href="#i-megaphone"/></svg>群公告</span>
+            <button class="ghost mini-btn" id="gsAnnounceEdit">编辑</button>
+          </div>
+          <p class="gs-announce" id="gsAnnounce">还没有群公告</p>
+        </section>
+        <section class="gs-card">
+          <div class="gs-card-head">
+            <span><svg class="gs-ic"><use href="#i-folder"/></svg>群文件 <em id="gsFileCount">0</em></span>
+            <button class="ghost mini-btn" id="gsUpload">
+              <svg class="gs-ic"><use href="#i-upload"/></svg>上传
+            </button>
+          </div>
+          <div class="gs-tabs" id="gsFileTabs">
+            <button type="button" class="active" data-ftab="file">文件</button>
+            <button type="button" data-ftab="album">群相册</button>
+          </div>
+          <div class="gs-files" id="gsFiles"></div>
+        </section>
+        <section class="gs-card gs-members-card">
+          <div class="gs-card-head">
+            <span><svg class="gs-ic"><use href="#i-group"/></svg>群聊成员 <em id="gsMemberCount">0</em></span>
+            <button class="ghost mini-btn" id="gsInvite">
+              <svg class="gs-ic"><use href="#i-user-add"/></svg>邀请
+            </button>
+          </div>
+          <input class="cs-input gs-search" id="gsMemberSearch" placeholder="搜索群成员" autocomplete="off">
+          <div class="gs-members" id="gsMembers"></div>
+        </section>
+      </div>
+    </aside>
   </main>
 
   <!-- 手机底部导航 -->
@@ -367,6 +521,7 @@
 
   <div class="action-sheet hidden" id="mobileActions">
     <div class="sheet">
+      <button data-act="createGroup"><svg><use href="#i-group"/></svg>创建群聊</button>
       <button data-act="chatStyle"><svg><use href="#i-palette"/></svg>聊天设置</button>
       <button data-act="multiselect"><svg><use href="#i-select"/></svg>多选消息</button>
       <button data-act="stickerManage"><svg><use href="#i-edit"/></svg>管理表情包</button>
@@ -380,7 +535,9 @@
 <!-- 右键菜单 -->
 <div class="ctx-menu hidden" id="ctxMenu">
   <button data-act="copy"><svg><use href="#i-copy"/></svg>复制文字</button>
+  <button data-act="quote"><svg><use href="#i-quote"/></svg>引用回复</button>
   <button data-act="resend"><svg><use href="#i-refresh"/></svg>重新发送</button>
+  <button data-act="shareGroup"><svg><use href="#i-group"/></svg>分享到群</button>
   <button data-act="recall" class="danger"><svg><use href="#i-recall"/></svg>撤回消息</button>
   <button data-act="delete"><svg><use href="#i-trash"/></svg>删除本地显示</button>
 </div>
@@ -388,12 +545,23 @@
 <!-- 更多菜单 -->
 <div class="ctx-menu hidden" id="moreMenu">
   <button data-act="multiselect"><svg><use href="#i-select"/></svg>多选消息</button>
+  <button data-act="createGroup"><svg><use href="#i-group"/></svg>创建群聊</button>
   <button data-act="chatStyle"><svg><use href="#i-palette"/></svg>聊天设置</button>
   <button data-act="stickerManage"><svg><use href="#i-edit"/></svg>管理表情包</button>
   <button data-act="reconnect"><svg><use href="#i-refresh"/></svg>重新连接</button>
   <button data-act="clear">清空本地显示</button>
   <button data-act="stapxs">打开经典客户端（Stapxs）</button>
 </div>
+
+<!-- 群成员行操作菜单 -->
+<div class="ctx-menu hidden" id="memberMenu">
+  <button data-mact="at"><svg><use href="#i-at"/></svg>@ ta</button>
+  <button data-mact="admin"><svg><use href="#i-crown"/></svg><span id="mactAdminText">设为管理员</span></button>
+  <button data-mact="kick" class="danger"><svg><use href="#i-user-minus"/></svg><span id="mactKickText">移出群聊</span></button>
+</div>
+
+<!-- 在线状态菜单（QQ 式，点自己的头像弹出） -->
+<div class="ctx-menu presence-menu hidden" id="presenceMenu"></div>
 
 <!-- 转发目标 -->
 <div class="modal-mask hidden" id="forwardMask">
@@ -408,6 +576,110 @@
   </div>
 </div>
 
+<!-- 创建群聊 -->
+<div class="modal-mask hidden" id="createGroupMask">
+  <div class="modal">
+    <header class="modal-head">
+      <h2>创建群聊</h2>
+      <button class="icon-btn" id="cgClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="cs-section">
+        <div class="cs-label">群名称</div>
+        <input class="cs-input" id="cgName" maxlength="24" placeholder="例如：基沃托斯闲聊群">
+      </div>
+      <div class="cs-section">
+        <div class="cs-label">选择好友</div>
+        <p class="cs-hint">勾几个好友进群，之后在群里还能继续邀请；新群默认允许被搜索。</p>
+        <div class="cg-members" id="cgMembers"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="ghost" id="cgCancel">取消</button>
+        <button class="btn-primary" id="cgCreate">创建群聊</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 邀请好友入群 -->
+<div class="modal-mask hidden" id="inviteMask">
+  <div class="modal mini-modal">
+    <header class="modal-head">
+      <h2>邀请好友入群</h2>
+      <button class="icon-btn" id="inviteClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="cg-members" id="inviteMembers"></div>
+      <div class="modal-actions">
+        <button class="btn-primary" id="inviteDone">完成</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 群设置 -->
+<div class="modal-mask hidden" id="groupSetMask">
+  <div class="modal">
+    <header class="modal-head">
+      <h2>群设置</h2>
+      <button class="icon-btn" id="gsSetClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="cs-section">
+        <div class="cs-label">群名称</div>
+        <div class="setting-inline">
+          <input class="cs-input" id="gsSetName" maxlength="24">
+          <button class="ghost mini-btn" id="gsSetSaveName">保存</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><strong>全员禁言</strong><span>禁言期间我发的消息大家都看得到，只是都不回</span></div>
+        <label class="switch"><input type="checkbox" id="gsSetMute"><i></i></label>
+      </div>
+      <div class="setting-row">
+        <div><strong>允许被搜索加入</strong><span>关掉后其他角色搜不到这个群</span></div>
+        <label class="switch"><input type="checkbox" id="gsSetSearch"><i></i></label>
+      </div>
+      <div class="setting-row">
+        <div><strong>群头像</strong><span>和换好友头像一样，裁剪后上传</span></div>
+        <div class="setting-inline">
+          <div class="avatar group-avatar gs-set-avatar" id="gsSetAvatarPreview" title="点击更换群头像"><span>群</span></div>
+          <button class="ghost" id="gsSetAvatar">更换</button>
+        </div>
+      </div>
+      <div class="cs-section">
+        <div class="cs-label">群聊节奏（只对这个群生效）</div>
+        <p class="cs-hint">控制她们在这个群里说多少、隔多久能再说、几个人接话、会不会自己起话头。改完立刻生效，重启也保留。</p>
+        <div class="setting-stack" id="gsLimits"></div>
+      </div>
+      <div class="setting-row about">
+        <div><strong>群号</strong><span id="gsSetGid">-</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 发布群公告 -->
+<div class="modal-mask hidden" id="announceMask">
+  <div class="modal mini-modal">
+    <header class="modal-head">
+      <h2>发布群公告</h2>
+      <button class="icon-btn" id="announceClose"><svg><use href="#i-close"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <textarea class="cs-input announce-input" id="announceInput" maxlength="300" rows="4"
+                placeholder="写一条公告，发出去后每个群成员都会看到"></textarea>
+      <p class="cs-hint">发布后所有群成员都会收到，并在她自己的记忆里留下这条公告。</p>
+      <div class="modal-actions">
+        <button class="ghost" id="announceCancel">取消</button>
+        <button class="btn-primary" id="announceSave">发布公告</button>
+      </div>
+    </div>
+  </div>
+</div>
+<input type="file" id="groupAvatarInput" accept="image/*" hidden>
+<input type="file" id="gsFileInput" multiple hidden>
+
 <!-- 图片预览 -->
 <div class="lightbox hidden" id="lightbox">
   <img id="lightboxImg" alt="">
@@ -421,7 +693,7 @@
       <div class="avatar bot-avatar" id="csAvatar"><span>星</span></div>
       <div class="cs-head-info">
         <h2 id="csTitle">星野</h2>
-        <span>头像 / 气泡 · 只对这个对话生效</span>
+        <span id="csSubTitle">头像 / 气泡 · 只对这个对话生效</span>
       </div>
       <button class="icon-btn" id="chatSettingsClose"><svg><use href="#i-close"/></svg></button>
     </header>
@@ -642,6 +914,6 @@
 <input type="file" id="characterAvatarInput" accept="image/*" hidden>
 
 <div class="toast hidden" id="toast"></div>
-<script src="./app.js?v=20261018c"></script>
+<script src="./app.js?v=20261019p"></script>
 </body>
 </html>

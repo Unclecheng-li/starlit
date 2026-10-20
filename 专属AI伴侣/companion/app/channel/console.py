@@ -31,6 +31,12 @@ class ConsoleChannel:
         self.self_id = self_id
         self.owner_id = owner_id
         self._out_lines: List[str] = []   # 测试时可回读
+        # 群聊要断言「是哪个角色开的口」，所以再记一份发送者（与 _out_lines 等长）
+        self._out_senders: List[str] = []
+        # 引用回复要断言「被引用的 mid 真的传到通道了」，同样与 _out_lines 等长
+        self._reply_mids: List[str] = []
+        # 出站消息的 mid（群里应该是库内 mid：g<id> / g<id>-2…），供测试断言
+        self._out_mids: List[str] = []
         self.echo = True
 
     # ---------- 生命周期 ----------
@@ -61,6 +67,10 @@ class ConsoleChannel:
         *,
         user_id: str = "",
         group_id: str = "",
+        sender_id: str = "",
+        sender_name: str = "",
+        reply_to_mid: str = "",
+        message_id: str = "",
     ) -> Dict[str, Any]:
         parts: List[str] = []
         for seg in segments:
@@ -76,13 +86,23 @@ class ConsoleChannel:
                 parts.append(f"［{t}］")
         line = "".join(parts)
         self._out_lines.append(line)
+        self._out_senders.append(sender_name or "")
+        self._reply_mids.append(str(reply_to_mid or ""))
+        self._out_mids.append(str(message_id or ""))
         if self.echo:
-            print(f"\n🤖 {line}\n")
+            who = f"{sender_name}: " if sender_name else ""
+            print(f"\n🤖 {who}{line}\n")
         return {"status": "ok", "message_id": len(self._out_lines)}
 
-    async def send_text(self, text: str, *, user_id: str = "", group_id: str = "") -> Dict[str, Any]:
+    async def send_text(self, text: str, *, user_id: str = "", group_id: str = "",
+                        sender_id: str = "", sender_name: str = "",
+                        reply_to_mid: str = "",
+                        message_id: str = "") -> Dict[str, Any]:
         return await self.send_segments([{"type": "text", "data": {"text": text}}],
-                                        user_id=user_id, group_id=group_id)
+                                        user_id=user_id, group_id=group_id,
+                                        sender_id=sender_id, sender_name=sender_name,
+                                        reply_to_mid=reply_to_mid,
+                                        message_id=message_id)
 
     async def send_sticker(
         self,
@@ -91,10 +111,16 @@ class ConsoleChannel:
         user_id: str = "",
         group_id: str = "",
         summary: str = "[表情包]",
+        sender_id: str = "",
+        sender_name: str = "",
+        reply_to_mid: str = "",
+        message_id: str = "",
     ) -> Dict[str, Any]:
         return await self.send_segments(
             [{"type": "image", "data": {"file": file, "sub_type": 1, "summary": summary}}],
             user_id=user_id, group_id=group_id,
+            sender_id=sender_id, sender_name=sender_name,
+            reply_to_mid=reply_to_mid, message_id=message_id,
         )
 
     # ---------- 输入循环 ----------

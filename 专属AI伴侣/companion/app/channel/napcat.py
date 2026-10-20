@@ -675,7 +675,14 @@ class NapCatChannel:
         group_id: str = "",
         sender_id: str = "",
         sender_name: str = "",
+        reply_to_mid: str = "",
+        message_id: str = "",
     ) -> Dict[str, Any]:
+        # message_id 是 vol 内部的库内 mid（自建通道用来统一 id 空间）；
+        # 真 QQ 链路的消息 id 由腾讯分配，这里只能忽略它。
+        # 引用回复：真 QQ 那边认 reply 段，这里顺手拼一个（群里引用我的消息时用）
+        if reply_to_mid and group_id and str(reply_to_mid).strip():
+            segments = [{"type": "reply", "data": {"id": str(reply_to_mid)}}] + list(segments)
         if group_id:
             payload = {"message_type": "group", "group_id": group_id, "message": segments}
         elif user_id:
@@ -685,15 +692,26 @@ class NapCatChannel:
         return await self.call("send_msg", payload)
 
     async def send_text(self, text: str, *, user_id: str = "", group_id: str = "",
-                        sender_id: str = "", sender_name: str = "") -> Dict[str, Any]:
-        return await self.send_segments([self.seg_text(text)], user_id=user_id, group_id=group_id)
+                        sender_id: str = "", sender_name: str = "",
+                        reply_to_mid: str = "",
+                        message_id: str = "") -> Dict[str, Any]:
+        return await self.send_segments([self.seg_text(text)], user_id=user_id,
+                                        group_id=group_id, sender_id=sender_id,
+                                        sender_name=sender_name,
+                                        reply_to_mid=reply_to_mid,
+                                        message_id=message_id)
 
     async def send_sticker(
         self, file: str, *, user_id: str = "", group_id: str = "", summary: str = "[表情包]",
-        sender_id: str = "", sender_name: str = "",
+        sender_id: str = "", sender_name: str = "", reply_to_mid: str = "",
+        message_id: str = "",
     ) -> Dict[str, Any]:
         return await self.send_segments(
             [self.seg_image(file, is_sticker=True, summary=summary)],
             user_id=user_id,
             group_id=group_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            reply_to_mid=reply_to_mid,
+            message_id=message_id,
         )

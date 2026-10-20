@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import Config
+from .schedule import Schedule, load_schedules, schedule_for
 
 
 @dataclass
@@ -27,6 +28,9 @@ class Character:
     persona: str
     is_primary: bool = False
     source: str = ""
+    # 角色自己的作息（睡点/起点）。没在 persona/schedules.json 里配的，
+    # 按名字派生一份稳定的默认作息 —— 不同角色天然错开，不会「一起困」。
+    schedule: Optional[Schedule] = None
 
     @property
     def is_guest(self) -> bool:
@@ -38,13 +42,17 @@ class CharacterRegistry:
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        # 角色作息表（persona/schedules.json），星野也走这套
+        self.schedules = load_schedules(cfg)
         pid = str(cfg.qq.self_id or "").strip() or "10000000"
+        pname = (cfg.qq.server.bot_nickname or "星野").strip() or "星野"
         self.primary = Character(
             id=pid,
-            name=(cfg.qq.server.bot_nickname or "星野").strip() or "星野",
+            name=pname,
             slug="",
             persona=cfg.read_persona("persona.md"),
             is_primary=True,
+            schedule=schedule_for(pname, self.schedules),
         )
         self._items: Dict[str, Character] = {self.primary.id: self.primary}
         self._order: List[str] = [self.primary.id]
@@ -87,6 +95,7 @@ class CharacterRegistry:
                 slug=slug,
                 persona=persona,
                 source=str(entry.get("source") or ""),
+                schedule=schedule_for(name, self.schedules),
             )
             self._order.append(cid)
         if len(self._order) > 1:

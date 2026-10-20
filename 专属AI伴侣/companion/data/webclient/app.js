@@ -22,7 +22,12 @@
     connectTip: $('#connectTip'),
 
     appView: $('#appView'),
+    connectBg: $('#connectBg'),
+    connectBgPick: $('#connectBgPick'),
+    connectBgInput: $('#connectBgInput'),
+    brandAvatar: $('#brandAvatar'),
     railAvatar: $('#railAvatar'),
+    railDot: $('#railDot'),
     railTheme: $('#railTheme'),
     railSticker: $('#railSticker'),
     railSettings: $('#railSettings'),
@@ -30,6 +35,8 @@
     mobileSettings: $('#mobileSettings'),
 
     meName: $('#meName'),
+    presenceChip: $('#presenceChip'),
+    presenceChipText: $('#presenceChipText'),
     connChip: $('#connChip'),
     connChipText: $('#connChip span'),
     searchInput: $('#searchInput'),
@@ -95,6 +102,8 @@
     mobileAvatar: $('#mobileAvatar'),
     mobileName: $('#mobileName'),
     mobileStatus: $('#mobileStatus'),
+    mobileDot: $('#mobileDot'),
+    mobilePresence: $('#mobilePresence'),
     mobilePlus: $('#mobilePlus'),
     mobileNav: $('#mobileNav'),
     navBadge: $('#navBadge'),
@@ -106,6 +115,7 @@
 
     ctxMenu: $('#ctxMenu'),
     moreMenu: $('#moreMenu'),
+    presenceMenu: $('#presenceMenu'),
     lightbox: $('#lightbox'),
     lightboxImg: $('#lightboxImg'),
     toast: $('#toast'),
@@ -141,6 +151,7 @@
     chatSettingsClose: $('#chatSettingsClose'),
     csAvatar: $('#csAvatar'),
     csTitle: $('#csTitle'),
+    csSubTitle: $('#csSubTitle'),
     csSideSeg: $('#csSideSeg'),
     csStyles: $('#csStyles'),
     csCustom: $('#csCustom'),
@@ -177,6 +188,64 @@
     avatarCancel: $('#avatarCancel'),
     avatarConfirm: $('#avatarConfirm'),
     avatarFileInput: $('#avatarFileInput'),
+
+    // ---- 群聊 ----
+    chatMain: $('#chatMain'),
+    chatAvatar: $('#chatAvatar'),
+    btnGroupSet: $('#btnGroupSet'),
+    btnGroupAt: $('#btnGroupAt'),
+    groupSide: $('#groupSide'),
+    gsAvatar: $('#gsAvatar'),
+    gsName: $('#gsName'),
+    gsCount: $('#gsCount'),
+    gsClose: $('#gsClose'),
+    gsRequestCard: $('#gsRequestCard'),
+    gsRequestCount: $('#gsRequestCount'),
+    gsRequests: $('#gsRequests'),
+    gsAnnounce: $('#gsAnnounce'),
+    gsAnnounceEdit: $('#gsAnnounceEdit'),
+    gsMemberCount: $('#gsMemberCount'),
+    gsInvite: $('#gsInvite'),
+    gsMemberSearch: $('#gsMemberSearch'),
+    gsMembers: $('#gsMembers'),
+    memberMenu: $('#memberMenu'),
+    mactAdminText: $('#mactAdminText'),
+    mactKickText: $('#mactKickText'),
+    createGroupMask: $('#createGroupMask'),
+    cgName: $('#cgName'),
+    cgMembers: $('#cgMembers'),
+    cgCancel: $('#cgCancel'),
+    cgCreate: $('#cgCreate'),
+    cgClose: $('#cgClose'),
+    inviteMask: $('#inviteMask'),
+    inviteMembers: $('#inviteMembers'),
+    inviteDone: $('#inviteDone'),
+    inviteClose: $('#inviteClose'),
+    groupSetMask: $('#groupSetMask'),
+    gsSetName: $('#gsSetName'),
+    gsSetSaveName: $('#gsSetSaveName'),
+    gsSetMute: $('#gsSetMute'),
+    gsSetSearch: $('#gsSetSearch'),
+    gsSetAvatar: $('#gsSetAvatar'),
+    gsSetAvatarPreview: $('#gsSetAvatarPreview'),
+    gsLimits: $('#gsLimits'),
+    gsSetGid: $('#gsSetGid'),
+    gsSetClose: $('#gsSetClose'),
+    announceMask: $('#announceMask'),
+    announceInput: $('#announceInput'),
+    announceCancel: $('#announceCancel'),
+    announceSave: $('#announceSave'),
+    announceClose: $('#announceClose'),
+    groupAvatarInput: $('#groupAvatarInput'),
+    gsFileTabs: $('#gsFileTabs'),
+    gsFiles: $('#gsFiles'),
+    gsUpload: $('#gsUpload'),
+    gsFileCount: $('#gsFileCount'),
+    gsFileInput: $('#gsFileInput'),
+    quoteBar: $('#quoteBar'),
+    qbName: $('#qbName'),
+    qbText: $('#qbText'),
+    qbClose: $('#qbClose'),
   };
 
   const state = {
@@ -188,6 +257,7 @@
            new URLSearchParams(location.search).get('access_token') || '',
     me: { id: 0, name: '我' },
     bot: { id: 0, name: '星野' },
+    presence: null,
     characters: [],
     charMsgs: {},
     convMeta: {},
@@ -232,9 +302,101 @@
     searchHits: [],
     searchIdx: -1,
     dragDepth: 0,
+
+    // ---- 群聊 ----
+    // 当前会话身份：private（私聊某个角色）/ group（某个自建群）。
+    // 「会话键」统一成字符串：私聊 = 角色 id，群聊 = "g"+群号 —— 两套
+    // id 空间互不重叠，convMeta / 已读 / 聊天气泡主题都能按同一个键索引。
+    peer: { type: 'private', id: 0, name: '星野' },
+    groups: [],                 // 群概览列表（/api/groups）
+    groupMsgs: {},              // gid(str) -> 消息数组（非当前会话的缓存）
+    groupDetail: {},            // gid(str) -> 完整详情（成员/公告/禁言）
+    groupMenuFor: '',           // 成员行操作菜单当前指向的成员 id
+    memberMenuFor: null,        // 成员行操作菜单当前指向的成员对象
+    joinRequests: [],           // 待审的入群申请（全局，群行红点用）
+    pendingMentions: [],        // 本次输入里 @ 了谁（发送时转成 at 段）
+    replyTo: null,              // 正在引用回复的消息（群里用）
+    groupFiles: {},             // gid(str) -> 群文件列表
+    groupFileTab: 'file',       // 群文件面板的页签：file / album
+    avatarTarget: null,         // 当前裁剪的是谁的头像（peer / group）
   };
 
   const nowSec = () => Math.floor(Date.now() / 1000);
+
+  // ---------------------------------------------------------- 会话键
+  // 私聊键 = String(角色 id)；群聊键 = "g" + 群号。所有按会话索引的表
+  // （convMeta / lastRead / 气泡主题 / 消息缓存）都用同一个键。
+  const isGroup = () => state.peer.type === 'group';
+  const groupKey = (gid) => 'g' + String(gid);
+  function curConvKey() {
+    return isGroup() ? groupKey(state.peer.id) : String(state.bot.id);
+  }
+  // 气泡主题也按会话键索引（私聊按角色；群里共用一套默认主题）
+  const themeKey = () => curConvKey();
+  // 取某个会话的消息数组（当前会话 = state.msgs），必要时惰性创建
+  function listFor(key) {
+    const k = String(key);
+    if (k === curConvKey()) return state.msgs;
+    if (k.charAt(0) === 'g') {
+      const gid = k.slice(1);
+      return state.groupMsgs[gid] || (state.groupMsgs[gid] = []);
+    }
+    return state.charMsgs[k] || (state.charMsgs[k] = []);
+  }
+  function groupById(gid) {
+    const g = String(gid);
+    return state.groups.find((x) => String(x.group_id) === g) || null;
+  }
+  function groupKnown(gid) {
+    const g = String(gid);
+    return !!groupById(g) || !!state.groupDetail[g];
+  }
+  // 群头像：优先用自建群上传的头像（/api/avatars 里键是 "g"+群号），
+  // 否则退回首字文字头像（群里没有 QQ 号可用），保持和好友头像同一尺寸。
+  function fillGroupAvatar(el, name, gid) {
+    if (!el) return;
+    const key = 'g' + String(gid);
+    el.textContent = '';
+    el.classList.remove('has-img');
+    const span = document.createElement('span');
+    span.textContent = firstChar(name || '群');
+    el.appendChild(span);
+    const custom = state.avatars[key];
+    if (!custom) return;
+    const img = document.createElement('img');
+    img.alt = name || '群';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.referrerPolicy = 'no-referrer';
+    img.addEventListener('load', () => el.classList.add('has-img'));
+    img.addEventListener('error', () => img.remove());
+    img.src = resolveAsset(custom);
+    el.appendChild(img);
+  }
+  function groupName(gid) {
+    const d = state.groupDetail[String(gid)];
+    if (d && d.group_name) return d.group_name;
+    const g = groupById(gid);
+    return (g && g.group_name) || '群聊';
+  }
+  // 当前会话的显示名（群名 / 角色名）
+  function curPeerName() {
+    return isGroup() ? groupName(state.peer.id) : state.bot.name;
+  }
+  function isOwner(uid) {
+    return String(uid || '') === String(state.me.id || '');
+  }
+  // 消息发送者（群消息用；私聊回落到当前角色）
+  function senderOf(ev) {
+    const s = ev.sender || {};
+    return {
+      id: String(s.user_id || ev.user_id || ''),
+      name: String(s.nickname || s.card || '').trim() || '成员',
+      role: String(s.role || 'member'),
+      title: String(s.title || ''),
+      level: Number(s.level || 1),
+    };
+  }
 
   const fmtClock = (ts) => {
     const d = new Date(ts * 1000);
@@ -283,12 +445,15 @@
 
   function fillAvatar(el, name, uin, fallback) {
     if (!el) return;
+    // 在线状态点是 railAvatar 的常驻子元素，不能被重画头像清掉
+    const dot = el.querySelector('.presence-dot');
     el.textContent = '';
     el.classList.remove('has-img');
     const span = document.createElement('span');
     span.textContent = fallback || firstChar(name);
     el.appendChild(span);
-    if (!uin) return;
+    const keepDot = () => { if (dot && !el.contains(dot)) el.appendChild(dot); };
+    if (!uin) { keepDot(); return; }
 
     const attach = (src, onFail) => {
       const img = document.createElement('img');
@@ -315,17 +480,34 @@
     } else {
       attach(qqAvatarUrl(uin));
     }
+    keepDot();
   }
 
-  // 头像换好后，把当前会话里的「角色头像」重画；
-  // 会话列表/联系人页由各自的 render 重新取头像，不能在这里一把全改。
+  // 头像换好后，把当前会话里的「角色头像」重画。
+  // ★ 群聊里每条消息的发送者各不相同 —— 拿 state.bot 去重画会把所有群成员
+  //   都画成同一个头像（实测 bug），所以群里直接按消息重建整屏。
   function refreshBotAvatars() {
+    // ★ 群模式放在 state.bot.id 检查之前：群聊里 state.bot 可能还没/已经
+    //   指向别的私聊角色，用它当闸门会把「刷新进页面时群头像没加载出来」
+    //   这个 bug 重新引回来（群渲染本就不依赖 state.bot）。
+    if (isGroup()) {
+      // ★ 群模式下：整屏消息要重画，右侧面板 + 聊天头部的群头像也要重画。
+      //   只调 renderAll 的话，刷新进页面时 chatAvatar 会停在文字兜底上，
+      //   必须等切走再切回来才变正常（实测 bug）—— 因为 state.avatars 是
+      //   异步才加载好的，而这里没通知头部。
+      renderAll(false);
+      renderGroupSide();
+      renderConvList();
+      renderContactList();
+      return;
+    }
     if (!state.bot.id) return;
-    document.querySelectorAll('#msgList .msg-row.in .avatar.bot-avatar, #chatSettingsMask .bot-avatar')
+    document.querySelectorAll('#msgList .msg-row.in .avatar.bot-avatar')
       .forEach((el) => {
         fillAvatar(el, state.bot.name, state.bot.id);
       });
     fillAvatar(els.emptyAvatar, state.bot.name, state.bot.id);
+    applyChatSettingsIdentity();
     renderConvList();
     renderContactList();
   }
@@ -487,7 +669,7 @@
   }
 
   function editTheme() {
-    return chatThemeFor(state.bot.id, state.chatSide);
+    return chatThemeFor(themeKey(), state.chatSide);
   }
 
   function saveChatThemes() {
@@ -509,8 +691,8 @@
   }
 
   function applyChatColors() {
-    setSideColorVars('in', chatThemeFor(state.bot.id, 'in'));
-    setSideColorVars('out', chatThemeFor(state.bot.id, 'out'));
+    setSideColorVars('in', chatThemeFor(themeKey(), 'in'));
+    setSideColorVars('out', chatThemeFor(themeKey(), 'out'));
   }
 
   function applyBubbleDecor(bubble, theme) {
@@ -537,7 +719,7 @@
       if (!row) continue;
       const bubble = row.querySelector('.bubble');
       if (!bubble) continue;
-      applyBubbleDecor(bubble, chatThemeFor(state.bot.id, side));
+      applyBubbleDecor(bubble, chatThemeFor(themeKey(), side));
       row.classList.toggle('has-tag', !!bubble.querySelector('.bubble-tag'));
     }
   }
@@ -549,7 +731,7 @@
         const bubble = row.querySelector('.bubble');
         if (!bubble) return;
         const dir = row.classList.contains('out') ? 'out' : 'in';
-        applyBubbleDecor(bubble, chatThemeFor(state.bot.id, dir));
+        applyBubbleDecor(bubble, chatThemeFor(themeKey(), dir));
         row.classList.toggle('has-tag', !!bubble.querySelector('.bubble-tag'));
       });
     }
@@ -557,8 +739,8 @@
   }
 
   function applyChatTheme() {
-    const ti = chatThemeFor(state.bot.id, 'in');
-    const to = chatThemeFor(state.bot.id, 'out');
+    const ti = chatThemeFor(themeKey(), 'in');
+    const to = chatThemeFor(themeKey(), 'out');
     document.documentElement.dataset.bubbleIn = ti.style;
     document.documentElement.dataset.bubbleOut = to.style;
     applyChatColors();
@@ -576,14 +758,22 @@
     els.connChip.className = 'conn-chip' + (kind ? ' ' + kind : '');
     els.connChipText.textContent = text;
     els.onlineDot.className = 'online-dot' + (kind === 'ok' ? ' ok' : '');
-    els.chatSub.textContent = kind === 'ok' ? '在线 · 本地直连' : text;
+    // 群会话的副标题由群状态（人数/禁言）决定，不被连接文案覆盖
+    if (!isGroup()) {
+      els.chatSub.textContent = kind === 'ok' ? '在线 · 本地直连' : text;
+    }
     els.input.placeholder = kind === 'ok'
-      ? `和${state.bot.name}说点什么…`
+      ? `和${curPeerName()}说点什么…`
       : '连接断开，正在重连…';
     if (els.mobileStatus) {
-      els.mobileStatus.textContent = kind === 'ok' ? '在线' : text;
-      const line = els.mobileStatus.closest('.mh-status');
-      if (line) line.classList.toggle('ok', kind === 'ok');
+      if (state.presence) {
+        // 已经拿到在线状态 → 用状态标签，连接状态交给别处显示
+        applyPresenceUI();
+      } else {
+        els.mobileStatus.textContent = kind === 'ok' ? '在线' : text;
+        const line = els.mobileStatus.closest('.mh-status');
+        if (line) line.classList.toggle('ok', kind === 'ok');
+      }
     }
   }
 
@@ -703,7 +893,13 @@
           saveLastRead();
         } catch (e) { /* 老服务端没有 lastMsg 就留空 */ }
 
+        // 群列表（自建群走 HTTP；拿到后才有群会话可切）
+        await loadGroups();
+        restorePeer();
         applyIdentity();
+        applyChatTheme();
+        renderConvList();
+        renderContactList();
         if (state.token) els.settingsToken.value = state.token;
 
         // 多端同步：连接时把每个会话都补齐，而不是只补当前打开的这一个。
@@ -782,29 +978,75 @@
 
   function applyIdentity() {
     els.meName.textContent = state.me.name;
-    els.chatName.textContent = state.bot.name;
     fillAvatar(els.railAvatar, state.me.name, state.me.id, '我');
-    fillAvatar(els.emptyAvatar, state.bot.name, state.bot.id);
     fillAvatar(els.mobileAvatar, state.me.name, state.me.id, '我');
-    fillAvatar(els.csAvatar, state.bot.name, state.bot.id);
-    fillAvatar(els.csPreviewInAvatar, state.bot.name, state.bot.id);
-    fillAvatar(els.csPreviewOutAvatar, state.me.name, state.me.id, '我');
     els.mobileName.textContent = state.me.name;
-    els.csTitle.textContent = state.bot.name;
-    const emptyText = els.emptyState.querySelector('p');
-    if (emptyText) emptyText.textContent = `和${state.bot.name}打个招呼吧`;
-    els.input.placeholder = `和${state.bot.name}说点什么…`;
-    document.title = `${state.bot.name} · vol`;
+    applyChatSettingsIdentity();
     applyFavicon();
-    applyChatTheme();
-    renderConvList();
-    renderContactList();
+    applyPeerIdentity();
     loadAvatars();
     loadStickerSets();
+    loadPresence();
     if (state.token) {
       els.settingsToken.value = state.token;
       els.tokenInput.value = state.token;
     }
+  }
+
+  // 「聊天设置」弹窗代表的是**当前私聊角色**。这几行以前只写在 applyIdentity()
+  // 里，而它只在连接握手时跑一次 —— 于是切换会话后弹窗一直显示同一个人
+  // （实测 bug：每个人的聊天设置都长一样）。现在它跟着每次切会话一起刷新。
+  function applyChatSettingsIdentity() {
+    const name = state.bot.name;
+    fillAvatar(els.csAvatar, name, state.bot.id);
+    // ★ 弹窗顶部那颗「聊天对象头像」预览也必须跟着走 —— 以前漏了它，
+    //   所以不管切到谁，预览里永远是默认的那个字。
+    fillAvatar(els.csAvatarPreview, name, state.bot.id);
+    fillAvatar(els.csPreviewInAvatar, name, state.bot.id);
+    fillAvatar(els.csPreviewOutAvatar, state.me.name, state.me.id, '我');
+    els.csTitle.textContent = name;
+    if (els.csSubTitle) {
+      els.csSubTitle.textContent = `头像 / 气泡 · 只对「${name}」生效`;
+    }
+    if (els.csAvatar) els.csAvatar.title = `点击更换「${name}」的头像`;
+    if (els.csAvatarPreview) els.csAvatarPreview.title = `点击更换「${name}」的头像`;
+  }
+
+  // 当前会话（私聊 / 群聊）的身份：标题 / 头像 / 副标题 / 输入框提示 / 文档标题。
+  // 私聊专属的入口（聊天设置、表情包管理）在群里隐藏，群专属入口（群设置、
+  // @全体、右侧面板）在私聊里隐藏。
+  function applyPeerIdentity() {
+    const g = isGroup();
+    // ★ 聊天设置弹窗的内容跟着当前私聊角色走（群里虽然打不开它，但切回私聊时
+    //   必须是那个人的信息）
+    applyChatSettingsIdentity();
+    els.chatName.textContent = curPeerName();
+    if (els.chatAvatar) {
+      els.chatAvatar.classList.toggle('hidden', !g);
+      if (g) fillGroupAvatar(els.chatAvatar, curPeerName(), state.peer.id);
+    }
+    if (g) {
+      const d = state.groupDetail[String(state.peer.id)];
+      const n = d ? (d.member_count || (d.members || []).length)
+                  : ((groupById(state.peer.id) || {}).member_count || 0);
+      const muted = d ? !!d.mute_all : !!((groupById(state.peer.id) || {}).mute_all);
+      els.chatSub.textContent = (muted ? '全员禁言中 · ' : '') + `${n} 人`;
+    } else {
+      els.chatSub.textContent = state.connected ? '在线 · 本地直连' : '连接中…';
+      fillAvatar(els.emptyAvatar, state.bot.name, state.bot.id);
+      const emptyText = els.emptyState.querySelector('p');
+      if (emptyText) emptyText.textContent = `和${state.bot.name}打个招呼吧`;
+    }
+    els.input.placeholder = state.connected
+      ? `和${curPeerName()}说点什么…` : '连接断开，正在重连…';
+    updateDocTitle();
+    if (els.btnChatStyle) els.btnChatStyle.classList.toggle('hidden', g);
+    if (els.btnGroupSet) els.btnGroupSet.classList.toggle('hidden', !g);
+    if (els.btnGroupAt) els.btnGroupAt.classList.toggle('hidden', !g);
+    if (els.groupSide) {
+      els.groupSide.classList.toggle('hidden', !g || !!state.groupSideHidden);
+    }
+    renderGroupSide();
   }
 
   // ---------------------------------------------------------- 多会话
@@ -824,9 +1066,10 @@
   }
 
   function updateDocTitle() {
+    const n = curPeerName();
     document.title = state.unread
-      ? `(${state.unread}) ${state.bot.name} · vol`
-      : `${state.bot.name} · vol`;
+      ? `(${state.unread}) ${n} · vol`
+      : `${n} · vol`;
   }
 
   function saveLastRead() {
@@ -837,6 +1080,8 @@
   function syncReadState(peerId, ts) {
     if (!state.ws || state.ws.readyState !== 1) return;
     const key = String(peerId);
+    // 群聊的已读只存在本机（服务端 set_msg_read 没有群的语义）
+    if (key.charAt(0) === 'g') return;
     const now = nowSec();
     if (now - Number(state.lastReadSent[key] || 0) < 5) return;
     state.lastReadSent[key] = now;
@@ -846,7 +1091,7 @@
     }, 8000).catch(() => { /* 老服务端没有这个 action 也不影响 */ });
   }
 
-  function markRead(peerId, ts = 0) {
+  function markRead(peerId = curConvKey(), ts = 0) {
     const key = String(peerId);
     const prev = Number(state.lastRead[key] || 0);
     const next = Math.max(prev, Number(ts || nowSec()));
@@ -857,10 +1102,9 @@
     syncReadState(peerId, next);
   }
 
-  function recomputeUnread(peerId) {
+  function recomputeUnread(peerId = curConvKey()) {
     const key = String(peerId);
-    const list = Number(peerId) === Number(state.bot.id)
-      ? state.msgs : (state.charMsgs[key] || []);
+    const list = key === curConvKey() ? state.msgs : listFor(key);
     let lastRead = Number(state.lastRead[key] || 0);
     if (!lastRead && list.length) {
       // 新设备第一次同步：把当前进度当成已读，避免历史全部变成红点
@@ -881,31 +1125,54 @@
     if (!els.convList) return;
     const q = (els.searchInput?.value || '').trim();
     els.convList.innerHTML = '';
+    const cur = curConvKey();
     // QQ 式排序：最近说过话的排最上面；没有聊天记录的沉底。
+    // 私聊和群聊在同一个列表里合并排序（像 QQ 的消息页）。
     const items = [];
     let order = 0;
     for (const c of state.characters) {
-      const meta = convMetaFor(c.id);
-      const cache = c.id === state.bot.id ? state.msgs : (state.charMsgs[c.id] || []);
+      const key = String(c.id);
+      const meta = convMetaFor(key);
+      const cache = key === cur ? state.msgs : (state.charMsgs[key] || []);
       const last = cache.length ? cache[cache.length - 1] : null;
-      const preview = meta.preview || (last ? ((last.dir === 'out' ? '我：' : '') + previewOf(last)) : '还没有聊天，打个招呼吧');
+      const preview = meta.preview ||
+        (last ? ((last.dir === 'out' ? '我：' : '') + previewOf(last))
+              : '还没有聊天，打个招呼吧');
       const ts = meta.ts || (last ? last.ts : 0);
-      items.push({ c, meta, preview, ts, order: order++ });
+      items.push({ kind: 'private', id: c.id, key, name: c.name,
+                   meta, preview, ts, order: order++ });
+    }
+    for (const g of state.groups) {
+      const gid = String(g.group_id);
+      const key = groupKey(gid);
+      const meta = convMetaFor(key);
+      const cache = key === cur ? state.msgs : (state.groupMsgs[gid] || []);
+      const last = cache.length ? cache[cache.length - 1] : null;
+      let preview = meta.preview;
+      if (!preview && last) {
+        const who = last.dir === 'out' ? '我：'
+          : (last.sender ? last.sender.name + '：' : '');
+        preview = who + previewOf(last);
+      }
+      const ts = meta.ts || (last ? last.ts : 0);
+      items.push({ kind: 'group', id: gid, key, name: g.group_name || '群聊',
+                   meta, preview, ts, order: order++,
+                   pending: Number(g.pending || 0), muteAll: !!g.mute_all });
     }
     items.sort((a, b) => (b.ts - a.ts) || (a.order - b.order));
 
-    for (const item of items) {
-      const { c, meta, preview, ts } = item;
-      if (q && !(c.name.includes(q) || preview.includes(q))) continue;
+    for (const it of items) {
+      if (q && !(it.name.includes(q) || (it.preview || '').includes(q))) continue;
 
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'conv' + (c.id === state.bot.id ? ' active' : '');
-      btn.dataset.peer = String(c.id);
+      btn.className = 'conv' + (it.key === cur ? ' active' : '');
+      btn.dataset.peer = it.key;
 
       const av = document.createElement('div');
-      av.className = 'avatar bot-avatar';
-      fillAvatar(av, c.name, c.id);
+      av.className = 'avatar ' + (it.kind === 'group' ? 'group-avatar' : 'bot-avatar');
+      if (it.kind === 'group') fillGroupAvatar(av, it.name, it.id);
+      else fillAvatar(av, it.name, it.id);
 
       const main = document.createElement('div');
       main.className = 'conv-main';
@@ -913,28 +1180,41 @@
       top.className = 'conv-top';
       const nm = document.createElement('span');
       nm.className = 'conv-name';
-      nm.textContent = c.name;
+      nm.textContent = it.name;
+      if (it.kind === 'group') {
+        const tag = document.createElement('span');
+        tag.className = 'conv-tag';
+        tag.textContent = '群';
+        nm.appendChild(tag);
+      }
       const tm = document.createElement('span');
       tm.className = 'conv-time';
-      tm.textContent = fmtConvTime(ts);
+      tm.textContent = fmtConvTime(it.ts);
       top.append(nm, tm);
 
       const bottom = document.createElement('div');
       bottom.className = 'conv-bottom';
       const pv = document.createElement('span');
       pv.className = 'conv-preview';
-      pv.textContent = preview;
+      pv.textContent = it.preview || (it.kind === 'group' ? '群里还很安静' : '');
       bottom.appendChild(pv);
-      if (meta.unread > 0) {
+      if (it.meta.unread > 0) {
         const bd = document.createElement('span');
         bd.className = 'badge';
-        bd.textContent = meta.unread > 99 ? '99+' : String(meta.unread);
+        bd.textContent = it.meta.unread > 99 ? '99+' : String(it.meta.unread);
+        bottom.appendChild(bd);
+      } else if (it.pending > 0) {
+        // 有待审的入群申请：群行挂红点数字（点进去就能审批）
+        const bd = document.createElement('span');
+        bd.className = 'conv-pending';
+        bd.title = '有入群申请待处理';
+        bd.textContent = String(it.pending);
         bottom.appendChild(bd);
       }
       main.append(top, bottom);
       btn.append(av, main);
       btn.addEventListener('click', () => {
-        selectCharacter(c.id);
+        selectPeer(it.kind, it.id);
         if (window.matchMedia('(max-width: 880px)').matches) openMobileChat();
       });
       els.convList.appendChild(btn);
@@ -944,81 +1224,306 @@
   function renderContactList() {
     if (!els.contactList) return;
     els.contactList.innerHTML = '';
-    for (const c of state.characters) {
+    const addRow = (kind, id, name, sub) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'mp-contact';
       const av = document.createElement('div');
-      av.className = 'avatar bot-avatar';
-      fillAvatar(av, c.name, c.id);
+      av.className = 'avatar ' + (kind === 'group' ? 'group-avatar' : 'bot-avatar');
+      if (kind === 'group') fillGroupAvatar(av, name, id);
+      else fillAvatar(av, name, id);
       const main = document.createElement('div');
       main.className = 'mp-contact-main';
       const strong = document.createElement('strong');
-      strong.textContent = c.name;
+      strong.textContent = name;
       const span = document.createElement('span');
-      span.textContent = '点这里开始聊天';
+      span.textContent = sub;
       main.append(strong, span);
       const chev = document.createElement('svg');
       chev.setAttribute('class', 'chev');
       chev.innerHTML = '<use href="#i-back"/>';
       btn.append(av, main, chev);
       btn.addEventListener('click', () => {
-        selectCharacter(c.id);
+        selectPeer(kind, id);
         openMobileChat();
       });
       els.contactList.appendChild(btn);
+    };
+    for (const g of state.groups) {
+      addRow('group', g.group_id, g.group_name || '群聊',
+             `${Number(g.member_count || 0)} 人 · 点这里进群`);
+    }
+    for (const c of state.characters) {
+      addRow('private', c.id, c.name, '点这里开始聊天');
+    }
+    if (!state.groups.length && !state.characters.length) {
+      const empty = document.createElement('p');
+      empty.className = 'cs-hint';
+      empty.textContent = '还没有好友，先在设置里添加一个吧。';
+      els.contactList.appendChild(empty);
     }
   }
 
-  function selectCharacter(cid) {
-    const char = state.characters.find((c) => c.id === Number(cid));
-    if (!char) return;
-    if (state.selectMode) exitSelectMode();
-    if (char.id === state.bot.id) {
-      if (els.searchInput) els.searchInput.value = '';
-      renderConvList();
-      return;
+  // ---------------------------------------------------------- 群聊数据层
+  // 群列表 / 详情 / 管理走 HTTP（/api/groups*），群消息走 OneBot WS。
+  // 用 HTTP 是因为建群、审批、改名这些动作没有对应的 OneBot action，
+  // 而消息历史两条路都通，走 WS 能跟实时事件共用一套渲染。
+
+  async function loadGroups() {
+    try {
+      const res = await apiFetch('/api/groups', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || data.ok === false) return;
+      state.groups = Array.isArray(data.groups) ? data.groups : [];
+      state.joinRequests = Array.isArray(data.requests) ? data.requests : [];
+    } catch (e) { /* 老服务端没有群接口，静默 */ }
+  }
+
+  function syncGroupSummary(d) {
+    if (!d || !d.group_id) return;
+    const g = groupById(d.group_id);
+    const pend = (d.pending || d.pending_requests || []).length;
+    if (g) {
+      g.group_name = d.group_name || g.group_name;
+      g.member_count = d.member_count || g.member_count;
+      g.mute_all = !!d.mute_all;
+      g.searchable = !!d.searchable;
+      g.announce = (d.announce || {}).text || '';
+      g.pending = pend;
     }
-    const old = state.bot.id;
-    if (old) state.charMsgs[old] = state.msgs;
-    state.bot = char;
-    state.msgs = state.charMsgs[char.id] || [];
+  }
+
+  // 群资料（成员/公告/参数）节流刷新：系统消息一来就刷，但别刷爆接口
+  const groupDetailRefreshedAt = {};
+  function refreshGroupDetailSoon(gid) {
+    const g = String(gid || '');
+    if (!g) return;
+    const now = Date.now();
+    if (now - Number(groupDetailRefreshedAt[g] || 0) < 3000) return;
+    groupDetailRefreshedAt[g] = now;
+    loadGroupDetail(g);
+    loadGroupFiles(g);
+  }
+
+  // 群成员的「等级 / 角色 / 群名片」是动态的（说得多就升级）。气泡上的徽章
+  // 是**当刻快照**，之后有人又说几句，聊天里的旧徽章就和右侧成员列表对不上
+  // 了（用户实测 bug）。这里以成员表为唯一真源，把该群所有缓存消息的发送者
+  // 徽章刷一遍；当前会话变了就重画。
+  function syncGroupMemberMeta(gid) {
+    const g = String(gid || '');
+    const d = state.groupDetail[g];
+    if (!d || !(d.members || []).length) return;
+    const byUid = {};
+    for (const m of d.members) byUid[String(m.user_id)] = m;
+    const lists = [];
+    if (state.groupMsgs[g]) lists.push(state.groupMsgs[g]);
+    if (curConvKey() === 'g' + g && state.msgs !== state.groupMsgs[g]) {
+      lists.push(state.msgs);
+    }
+    let changed = false;
+    for (const list of lists) {
+      for (const msg of list) {
+        if (!msg || !msg.sender) continue;
+        const m = byUid[String(msg.sender.id)];
+        if (!m) continue;
+        const lv = Number(m.level || 1);
+        if (Number(msg.sender.level || 0) !== lv) { msg.sender.level = lv; changed = true; }
+        const role = String(m.role || 'member');
+        if (String(msg.sender.role || '') !== role) { msg.sender.role = role; changed = true; }
+        const nm = String(m.nickname || '');
+        if (nm && msg.sender.name !== nm) { msg.sender.name = nm; changed = true; }
+      }
+    }
+    if (changed && isGroup() && String(state.peer.id) === g) renderAll(false);
+  }
+
+  // 我（群主）在这个群里的等级。以前本机刚发出去的气泡写死 level:0（=不显示
+  // 徽章），一刷新又变成 LV1，和右侧成员列表里的「群主 LV_x」对不上。
+  function myGroupLevel() {
+    const d = curGroupDetail();
+    const m = ((d && d.members) || []).find((x) => x.is_me
+      || String(x.user_id) === String(state.me.id));
+    return Number((m && m.level) || 1);
+  }
+
+  async function loadGroupDetail(gid, opts = {}) {
+    const g = String(gid || '');
+    if (!g) return null;
+    try {
+      const res = await apiFetch(
+        `/api/groups/detail?group_id=${encodeURIComponent(g)}`,
+        { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || data.ok === false) return null;
+      state.groupDetail[g] = data;
+      syncGroupSummary(data);
+      syncGroupMemberMeta(g);
+      if (opts.render !== false) {
+        renderConvList();
+        if (isGroup() && String(state.peer.id) === g) renderGroupSide();
+      }
+      return data;
+    } catch (e) { return null; }
+  }
+
+  async function groupManage(op, body = {}) {
+    const res = await apiFetch('/api/groups/manage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op, ...body }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data || data.ok === false) {
+      throw new Error((data && data.error) || '操作失败');
+    }
+    if (data.group_id) {
+      state.groupDetail[String(data.group_id)] = data;
+      syncGroupSummary(data);
+      syncGroupMemberMeta(data.group_id);
+      renderConvList();
+      if (isGroup() && String(state.peer.id) === String(data.group_id)) {
+        renderGroupSide();
+      }
+    }
+    return data;
+  }
+
+  function restorePeer() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('vol.peer') || 'null'); }
+    catch (e) { saved = null; }
+    if (saved && saved.type === 'group' && groupById(saved.id)) {
+      return setActivePeer('group', saved.id);
+    }
+    const savedId = Number(localStorage.getItem('vol.currentPeer') || 0);
+    const char = state.characters.find((c) => c.id === savedId) ||
+      (saved && saved.type === 'private'
+        ? state.characters.find((c) => c.id === Number(saved.id)) : null) ||
+      state.characters[0];
+    if (char) return setActivePeer('private', char.id);
+    if (state.groups.length) return setActivePeer('group', state.groups[0].group_id);
+    return false;
+  }
+
+  // 只切「当前会话」，不拉历史、不重画（连接握手时用）
+  function setActivePeer(type, id) {
+    // ★ 先把「当前会话」的消息数组存回它**自己的**缓存，而且必须在分支之前
+    //   按会话键存。以前的私聊分支用 state.bot.id 决定存哪 —— 而从群切回私聊时
+    //   state.msgs 里装的是**群的消息**，state.bot 还停在上一个私聊角色，于是
+    //   群消息被写进了那个角色的私聊缓存：之后点开她，看到的就是群聊的界面。
+    const prev = curConvKey();
+    if (prev && prev !== '0') {
+      if (prev.charAt(0) === 'g') state.groupMsgs[prev.slice(1)] = state.msgs;
+      else state.charMsgs[prev] = state.msgs;
+    }
+
+    if (type === 'group') {
+      const gid = String(id);
+      if (!groupById(gid) && !state.groupDetail[gid]) return false;
+      state.peer = { type: 'group', id: gid, name: groupName(gid) };
+      state.msgs = state.groupMsgs[gid] || (state.groupMsgs[gid] = []);
+    } else {
+      const cid = Number(id);
+      const char = state.characters.find((c) => c.id === cid);
+      if (!char) return false;
+      state.bot = char;
+      state.peer = { type: 'private', id: char.id, name: char.name };
+      state.msgs = state.charMsgs[char.id] || (state.charMsgs[char.id] = []);
+    }
     state.lastTs = 0;
+    state.pendingMentions = [];
+    state.replyTo = null;
+    state.groupSideHidden = false;
     rebuildMidIndex();
-    localStorage.setItem('vol.currentPeer', String(char.id));
-    clearUnread(char.id);
-    applyIdentity();
+    try {
+      localStorage.setItem('vol.peer',
+        JSON.stringify({ type: state.peer.type, id: state.peer.id }));
+    } catch (e) { /* ignore */ }
+    if (state.peer.type === 'private') {
+      localStorage.setItem('vol.currentPeer', String(state.peer.id));
+    }
+    return true;
+  }
+
+  // 完整的会话切换：切数据 + 清红点 + 重画 + 按需拉历史
+  function selectPeer(type, id) {
+    if (state.selectMode) exitSelectMode();
+    const isGroupTarget = type === 'group';
+    if (!setActivePeer(type, id)) return;
+    if (els.searchInput) els.searchInput.value = '';
+    const key = curConvKey();
+    clearUnread(key);
+    applyPeerIdentity();
+    applyChatTheme();
+    renderConvList();
     renderAll(false);
-    if (!state.loaded[char.id]) {
-      state.loaded[char.id] = true;
-      loadHistoryFor(char.id);
+    if (isGroupTarget) loadGroupDetail(state.peer.id);
+    if (isGroupTarget) loadGroupFiles(state.peer.id);
+    renderQuoteBar();
+    if (!state.loaded[key]) {
+      state.loaded[key] = true;
+      loadHistoryFor(key);
     } else {
       scrollToBottom(false);
     }
   }
 
-  async function loadHistoryFor(id) {
+  // 兼容旧调用点（全部走泛化后的 selectPeer）
+  function selectCharacter(cid) {
+    selectPeer('private', cid);
+  }
+
+  async function loadHistoryFor(key) {
+    const k = String(key);
+    if (k.charAt(0) === 'g') {
+      const gid = k.slice(1);
+      let rows = [];
+      try {
+        const h = await call('get_group_msg_history',
+          { group_id: gid, count: 80 }, 20000);
+        rows = h?.data?.messages || [];
+      } catch (e) { /* 历史失败不阻塞聊天 */ }
+      if (curConvKey() !== k) return;
+      mergeHistory(rows, k);
+      return;
+    }
     let history = [];
     try {
       const hist = await call('get_friend_msg_history',
-        { user_id: id, count: 80 }, 20000);
+        { user_id: Number(k), count: 80 }, 20000);
       history = hist?.data?.messages || [];
     } catch (e) { /* 历史失败不阻塞聊天 */ }
-    if (Number(id) !== Number(state.bot.id)) return;
-    mergeHistory(history, id);
+    if (curConvKey() !== k) return;
+    mergeHistory(history, k);
   }
 
   async function syncAllConversations() {
-    const currentId = Number(state.bot.id);
-    const jobs = state.characters.map(async (c) => {
-      const count = c.id === currentId ? 80 : 40;
-      try {
-        const hist = await call('get_friend_msg_history',
-          { user_id: c.id, count }, 20000);
-        mergeHistory(hist?.data?.messages || [], c.id, { scroll: false });
-        state.loaded[c.id] = true;
-      } catch (e) { /* 单个会话失败不影响其他会话 */ }
-    });
+    const cur = curConvKey();
+    const jobs = [];
+    for (const c of state.characters) {
+      const key = String(c.id);
+      jobs.push((async () => {
+        try {
+          const hist = await call('get_friend_msg_history',
+            { user_id: c.id, count: key === cur ? 80 : 40 }, 20000);
+          mergeHistory(hist?.data?.messages || [], key, { scroll: false });
+          state.loaded[key] = true;
+        } catch (e) { /* 单个会话失败不影响其他会话 */ }
+      })());
+    }
+    for (const g of state.groups) {
+      const key = groupKey(g.group_id);
+      jobs.push((async () => {
+        try {
+          const hist = await call('get_group_msg_history',
+            { group_id: g.group_id, count: key === cur ? 80 : 40 }, 20000);
+          mergeHistory(hist?.data?.messages || [], key, { scroll: false });
+          state.loaded[key] = true;
+        } catch (e) { /* 单个会话失败不影响其他会话 */ }
+      })());
+    }
     await Promise.all(jobs);
     renderConvList();
     scrollToBottom(false);
@@ -1033,16 +1538,24 @@
       return;
     }
     if (ev.post_type === 'message') {
-      if (ev.message_type && ev.message_type !== 'private') return;
-      handleIncoming(ev, isReplay);
+      if (ev.message_type === 'group' || ev.group_id) {
+        handleGroupIncoming(ev, isReplay);
+      } else if (ev.message_type && ev.message_type !== 'private') {
+        return;
+      } else {
+        handleIncoming(ev, isReplay);
+      }
     } else if (ev.post_type === 'message_sent') {
-      handleSent(ev);
+      if (ev.message_type === 'group' || ev.group_id) handleGroupSent(ev, isReplay);
+      else handleSent(ev);
     } else if (ev.post_type === 'notice') {
       if (ev.notice_type === 'friend_recall' || ev.notice_type === 'group_recall') {
         handleRecall(ev);
       } else if (ev.notice_type === 'read_state') {
         handleReadState(ev);
       }
+    } else if (ev.post_type === 'request') {
+      handleGroupRequest(ev);
     }
   }
 
@@ -1080,11 +1593,56 @@
         parts.push(isStickerSeg(seg) ? '[表情包]' : '[图片]');
       } else if (seg.type === 'face') parts.push('[表情]');
       else if (seg.type === 'record') parts.push('[语音]');
-      else if (seg.type === 'at') parts.push('@' + (d.qq || ''));
+      else if (seg.type === 'at') parts.push(atLabel(d.qq));
       else if (seg.type === 'reply') continue;
-      else if (seg.type === 'forward' || seg.type === 'json') parts.push('[聊天记录]');
+      else if (seg.type === 'json') {
+        const card = parseShareCard(seg);
+        parts.push(card ? `[分享] ${card.title}` : '[聊天记录]');
+      } else if (seg.type === 'forward') parts.push('[聊天记录]');
     }
     return parts.join('');
+  }
+
+  // 「甩分享」卡片：vol 发的是 OneBot 的 json 段（内容是一段 QQ 卡片同构的
+  // JSON）。解析出来就能画成可点卡片；解析不了就退回纯文本，不丢内容。
+  function parseShareCard(seg) {
+    const raw = seg && seg.data && seg.data.data;
+    if (!raw) return null;
+    try {
+      const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const news = ((obj || {}).meta || {}).news || {};
+      if (!news.jumpUrl && !news.title) return null;
+      return {
+        title: String(news.title || ''),
+        desc: String(news.desc || ''),
+        url: String(news.jumpUrl || ''),
+        tag: String(news.tag || ''),
+        preview: String(news.preview || ''),
+      };
+    } catch (e) { return null; }
+  }
+
+  function makeShareCard(card) {
+    const box = document.createElement('a');
+    box.className = 'share-card';
+    box.href = card.url || '#';
+    box.target = '_blank';
+    box.rel = 'noreferrer noopener';
+    const head = document.createElement('strong');
+    head.textContent = card.title || '分享';
+    box.appendChild(head);
+    if (card.desc) {
+      const p = document.createElement('p');
+      p.textContent = card.desc;
+      box.appendChild(p);
+    }
+    if (card.tag) {
+      const src = document.createElement('span');
+      src.className = 'share-src';
+      src.textContent = card.tag;
+      box.appendChild(src);
+    }
+    return box;
   }
 
   function previewOf(msg) {
@@ -1095,12 +1653,13 @@
   }
 
   // ---------------------------------------------------------- 消息模型
-  function makeMsg({ dir, segs, text, ts, mid = '', status = 'sent', displaySegs = null }) {
+  function makeMsg({ dir, segs, text, ts, mid = '', status = 'sent',
+                     displaySegs = null, sender = null, system = false }) {
     const key = `m${++state.keySeq}`;
     const t = ts || nowSec();
     return {
       key, dir, segs: displaySegs || segs || [], text: text || '',
-      ts: t, mid: String(mid || ''), status,
+      ts: t, mid: String(mid || ''), status, sender, system,
     };
   }
 
@@ -1109,8 +1668,17 @@
     state.msgs.push(msg);
     if (msg.mid) state.byMid.set(msg.mid, msg);
     hideEmptyState();
-    appendRow(msg);
-    updateConvPreview(msg);
+    // ★ 乱序到达（服务端 time 比最后一条还早，回放/离线补发时常见）：
+    //   排回时间序整屏重画，保证「右侧最下面那条」= 左侧预览引用的那条。
+    const prev = state.msgs[state.msgs.length - 2];
+    if (prev && Number(msg.ts || 0) < Number(prev.ts || 0)) {
+      state.msgs.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+      state.lastTs = 0;
+      renderAll(true);
+    } else {
+      appendRow(msg);
+    }
+    syncConvPreview();
     if (msg.dir === 'in') {
       const mobileAway = window.matchMedia('(max-width: 880px)').matches &&
         !els.appView.classList.contains('mobile-chat');
@@ -1139,35 +1707,58 @@
     return false;
   }
 
-  function mergeHistory(history, peerId = state.bot.id, opts = {}) {
-    const pid = Number(peerId);
-    const isCurrent = pid === Number(state.bot.id);
-    const list = isCurrent ? state.msgs
-      : (state.charMsgs[pid] || (state.charMsgs[pid] = []));
+  // 合并历史（私聊 / 群聊都用）。key = 会话键（私聊为 String(id)，群聊为 "g"+群号）。
+  // 方向判定：私聊按 sender 是否等于会话对象；群里按 sender 是否是「我」。
+  function mergeHistory(history, key = curConvKey(), opts = {}) {
+    const k = String(key);
+    const isCurrent = k === curConvKey();
+    const list = isCurrent ? state.msgs : listFor(k);
+    const group = k.charAt(0) === 'g';
+    const owner = String(state.me.id || '');
     const seen = new Set(list.map((m) => m.mid).filter(Boolean));
     let added = 0;
     for (const raw of (history || [])) {
       const segs = Array.isArray(raw.message) ? raw.message : [];
       const text = segsToText(segs) || String(raw.raw_message || '');
       if (!text && !segs.length) continue;
-      const senderId = Number(raw.sender?.user_id || 0);
-      const dir = senderId === pid ? 'in' : 'out';
+      const senderId = String(raw.sender?.user_id ?? raw.user_id ?? '');
+      const dir = group
+        ? (isOwner(senderId) ? 'out' : 'in')
+        : (Number(senderId) === Number(k) ? 'in' : 'out');
+      const isSystem = group && String(raw.sender?.role || '') === 'system';
       const mid = String(raw.message_id || '');
       if (mid && seen.has(mid)) continue;
       const m = makeMsg({
         dir, segs, text: text || '[消息]',
         ts: Number(raw.time) || 0,
         mid,
+        sender: group ? senderOf(raw) : null,
+        system: isSystem,
       });
+      // 引用回复：服务端把被引用的那条也带出来了（昵称 + 摘要）
+      const rq = raw.reply;
+      if (rq && (rq.text || rq.name)) {
+        m.replyTo = { name: String(rq.name || ''), text: String(rq.text || ''),
+                      message_id: String(rq.message_id || '') };
+      }
       // 对方的一轮回复可能是多条气泡拼起来的，时间跨度比单条大；
-      // 用户消息仍用 20 秒窗口，避免把重复发的同一句话误删
-      if (coveredByExisting(m, dir === 'in' ? 180 : 20, list)) continue;
+      // 用户消息仍用 20 秒窗口，避免把重复发的同一句话误删。
+      // ★ 群里**必须**保留按内容去重：群历史里一条 gmsg 的 message_id 是
+      //   `g<id>`，而实时推送/重放事件的 message_id 是随机序号 —— 两套 id
+      //   空间对不上，mid 去重失效。刷新页面时「历史 + 最近事件重放」会把
+      //   同一批消息各送一份（历史里还是把多条气泡并成一条），不靠内容+时间
+      //   去重就会看到重影。短句偶发被吞的代价远小于满屏重影。
+      const win = dir === 'in' ? 180 : 20;
+      if (coveredByExisting(m, win, list)) continue;
       list.push(m);
       if (mid) seen.add(mid);
       added += 1;
     }
     if (!added) {
-      if (!isCurrent) recomputeUnread(pid);
+      // ★ 即使没新增也要重推预览：否则服务端缓存里的旧 lastMsg 会一直
+      //   挂在左侧，和右侧真正的最新消息不一致（实测 bug）。
+      syncConvPreview(k);
+      if (!isCurrent) recomputeUnread(k);
       return 0;
     }
     list.sort((a, b) => (a.ts - b.ts));
@@ -1176,20 +1767,20 @@
       renderAll(false);
     }
     const last = list[list.length - 1];
-    if (last) updateConvPreview(last, pid);
+    if (last) updateConvPreview(last, k);
     if (isCurrent) {
-      markRead(pid, last?.ts || 0);
-      clearUnread(pid);
+      markRead(k, last?.ts || 0);
+      clearUnread(k);
       if (opts.scroll !== false) scrollToBottom(false);
     } else {
-      recomputeUnread(pid);
+      recomputeUnread(k);
     }
     return added;
   }
 
   function handleIncoming(ev, replay = false) {
     const mid = String(ev.message_id || '');
-    const peer = Number(ev.user_id || ev.sender?.user_id || 0);
+    const peer = String(ev.user_id || ev.sender?.user_id || '');
     const segs = segsOf(ev);
     const text = segsToText(segs) || String(ev.raw_message || '');
     const msg = makeMsg({
@@ -1197,22 +1788,23 @@
       ts: Number(ev.time) || nowSec(), mid,
     });
 
-    // 不是当前打开的会话：只更新列表预览和未读
-    if (peer && peer !== Number(state.bot.id)) {
-      const list = state.charMsgs[peer] || (state.charMsgs[peer] = []);
+    // ★ 私聊消息只能按「私聊会话键」归档。以前这里拿 state.bot.id 去比，
+    //   而在群会话里 state.bot 还停在上一个私聊角色 —— 于是那个角色的
+    //   私聊回复会被当成「当前会话的消息」塞进 state.msgs（＝群的消息数组），
+    //   表现就是「没进群的人却能在群里说话」。改成按会话键判定。
+    const cur = curConvKey();
+    if (peer !== cur) {
+      if (!peer) return;                     // 没有发送者，没法归档
+      const list = listFor(peer);
       if (mid && list.some((m) => m.mid === mid)) return;
       if (replay && coveredByExisting(msg, 180, list)) return;
       list.push(msg);
       list.sort((a, b) => a.ts - b.ts);
-      updateConvPreview(msg, peer);
+      syncConvPreview(peer);
       if (replay) {
         recomputeUnread(peer);
       } else {
-        const meta = convMetaFor(peer);
-        meta.unread = (meta.unread || 0) + 1;
-        state.unread = totalUnread();
-        updateBadges();
-        renderConvList();
+        bumpUnread(peer);
       }
       return;
     }
@@ -1225,13 +1817,15 @@
 
   function handleSent(ev) {
     const mid = String(ev.message_id || '');
-    const peer = Number(ev.user_id || state.bot.id);
+    const peer = String(ev.user_id || ev.sender?.user_id || '');
     const segs = segsOf(ev);
     const text = segsToText(segs) || String(ev.raw_message || '') || '[消息]';
     const replay = !!ev._replay;
+    const cur = curConvKey();
 
-    if (peer && peer !== Number(state.bot.id)) {
-      const list = state.charMsgs[peer] || (state.charMsgs[peer] = []);
+    if (peer !== cur) {
+      if (!peer) return;
+      const list = listFor(peer);
       if (mid && list.some((m) => m.mid === mid)) return;
       const m = makeMsg({
         dir: 'out', segs, text,
@@ -1240,8 +1834,7 @@
       if (replay && coveredByExisting(m, 20, list)) return;
       list.push(m);
       list.sort((a, b) => a.ts - b.ts);
-      updateConvPreview(m, peer);
-      renderConvList();
+      syncConvPreview(peer);
       return;
     }
 
@@ -1270,18 +1863,134 @@
     addMsg(m);
   }
 
+  // ---- 群消息：群里 user_id 是**发送者**（私聊里是会话对象），方向靠
+  //      「发送者是不是我」判定，会话身份靠 group_id。
+  // 事件里带的引用信息（服务端把我引用的那条也一并推过来了）
+  function replyInfoOf(ev) {
+    const r = ev && ev.reply;
+    if (!r || (!r.text && !r.name)) return null;
+    return { name: String(r.name || ''), text: String(r.text || ''),
+             message_id: String(r.message_id || '') };
+  }
+
+  function groupMsgFromEvent(ev) {
+    const segs = segsOf(ev);
+    const text = segsToText(segs) || String(ev.raw_message || '');
+    const sender = senderOf(ev);
+    return makeMsg({
+      dir: isOwner(sender.id) ? 'out' : 'in',
+      segs, text: text || '[消息]',
+      ts: Number(ev.time) || nowSec(),
+      mid: String(ev.message_id || ''),
+      sender,
+      system: String(sender.role || '') === 'system',
+      replyTo: replyInfoOf(ev),
+    });
+  }
+
+  function handleGroupIncoming(ev, replay = false) {
+    const gid = String(ev.group_id || '');
+    if (!gid) return;
+    const key = groupKey(gid);
+    const msg = groupMsgFromEvent(ev);
+    if (!groupKnown(gid)) {
+      // 陌生的群（别的设备新建的）：拉一次群列表把它补上
+      loadGroups().then(() => { renderConvList(); renderContactList(); });
+    }
+    // ★ 系统消息（入群/踢人/改名/公告/文件）意味着**成员或群资料变了** ——
+    //   以前只把这条消息画到聊天里，右侧面板要等你切走再切回来才更新。
+    if (msg.system) refreshGroupDetailSoon(gid);
+    if (key !== curConvKey()) {
+      const list = listFor(key);
+      if (msg.mid && list.some((m) => m.mid === msg.mid)) return;
+      if (replay && coveredByExisting(msg, 20, list)) return;
+      list.push(msg);
+      list.sort((a, b) => a.ts - b.ts);
+      syncConvPreview(key);
+      if (replay) recomputeUnread(key);
+      else bumpUnread(key);
+      return;
+    }
+    if (msg.mid && state.byMid.has(msg.mid)) return;
+    if (replay && coveredByExisting(msg, 20)) return;
+    addMsg(msg);
+  }
+
+  function handleGroupSent(ev, replay = false) {
+    const gid = String(ev.group_id || '');
+    if (!gid) return;
+    const key = groupKey(gid);
+    const segs = segsOf(ev);
+    const text = segsToText(segs) || String(ev.raw_message || '') || '[消息]';
+    const mid = String(ev.message_id || '');
+    const isRep = replay || !!ev._replay;
+
+    if (key !== curConvKey()) {
+      const list = listFor(key);
+      if (mid && list.some((m) => m.mid === mid)) return;
+      const m = makeMsg({
+        dir: 'out', segs, text,
+        ts: Number(ev.time) || nowSec(), mid,
+        sender: senderOf(ev),
+        replyTo: replyInfoOf(ev),
+      });
+      if (isRep && coveredByExisting(m, 20, list)) return;
+      list.push(m);
+      list.sort((a, b) => a.ts - b.ts);
+      syncConvPreview(key);
+      return;
+    }
+
+    if (mid && state.byMid.has(mid)) return;
+    // 本机刚发出的乐观气泡：把服务端正式 id 绑上去
+    const recent = state.msgs.find((m) => m.dir === 'out' && !m.mid &&
+      m.status === 'pending' && m.text === text && nowSec() - m.ts <= 20);
+    if (recent) {
+      if (mid) {
+        recent.mid = mid;
+        state.byMid.set(mid, recent);
+      }
+      const rq = replyInfoOf(ev);
+      if (rq && !recent.replyTo) recent.replyTo = rq;
+      if (recent.status !== 'failed') {
+        recent.status = 'sent';
+        refreshRow(recent);
+      }
+      return;
+    }
+    const m = makeMsg({
+      dir: 'out', segs, text,
+      ts: Number(ev.time) || nowSec(), mid, sender: senderOf(ev),
+      replyTo: replyInfoOf(ev),
+    });
+    if (isRep && coveredByExisting(m, 20)) return;
+    addMsg(m);
+  }
+
+  // 入群申请（post_type=request）：刷新待审列表，群行亮红点
+  function handleGroupRequest(ev) {
+    const gid = String(ev.group_id || '');
+    if (!gid) return;
+    loadGroups().then(() => {
+      renderConvList();
+      if (isGroup() && String(state.peer.id) === gid) renderGroupSide();
+    });
+    const who = String(ev.user_id || (ev.comment && ev.comment.name) || '');
+    toast(`有人申请加入群聊${who ? '：' + who : ''}`);
+  }
+
   function handleReadState(ev) {
-    const peer = Number(ev.user_id || ev.target_id || 0);
+    const peer = String(ev.user_id || ev.target_id || '');
     const ts = Number(ev.read_time || ev.time || 0);
     if (!peer || !ts) return;
-    const key = String(peer);
+    const key = peer;
     if (ts <= Number(state.lastRead[key] || 0)) return;
     state.lastRead[key] = ts;
     saveLastRead();
-    if (peer !== Number(state.bot.id)) {
-      recomputeUnread(peer);
+    if (key !== curConvKey()) {
+      recomputeUnread(key);
     } else {
-      const meta = convMetaFor(peer);
+      const meta = convMetaFor(key);
       meta.unread = 0;
       state.unread = totalUnread();
       updateBadges();
@@ -1293,10 +2002,28 @@
   function handleRecall(ev) {
     const mid = String(ev.message_id || '');
     if (!mid) return;
-    const peer = Number(ev.user_id || ev.target_id || 0);
-    const isCurrent = !peer || peer === Number(state.bot.id);
-    const list = isCurrent ? state.msgs
-      : (state.charMsgs[peer] || []);
+    // 群消息撤回：按群会话键找
+    const gid = String(ev.group_id || '');
+    if (gid && mid.charAt(0) === 'g') {
+      const key = groupKey(gid);
+      const list = key === curConvKey() ? state.msgs : listFor(key);
+      const gm = list.find((m) => m.mid === mid);
+      if (!gm || gm.recalled) return;
+      gm.recalled = gm.dir === 'out' ? 'me' : 'bot';
+      state.selected.delete(gm.key);
+      if (key === curConvKey()) {
+        refreshRow(gm);
+        updateMultiBar();
+      }
+      const glast = list[list.length - 1];
+      if (glast) syncConvPreview(key);
+      toast(gm.dir === 'out' ? '你撤回了一条消息' : '对方撤回了一条消息');
+      return;
+    }
+    const peer = String(ev.user_id || ev.target_id || '');
+    const key = peer;
+    const isCurrent = !key || key === curConvKey();
+    const list = isCurrent ? state.msgs : listFor(key);
     const msg = list.find((m) => m.mid === mid);
     if (!msg) return;
     if (msg.recalled) return;
@@ -1306,12 +2033,12 @@
       refreshRow(msg);
       updateMultiBar();
       const last = list[list.length - 1];
-      if (last && last.key === msg.key) updateConvPreview(last, peer || state.bot.id);
+      if (last && last.key === msg.key) syncConvPreview(key || curConvKey());
       toast(msg.dir === 'out' ? '你撤回了一条消息' : '对方撤回了一条消息');
     } else {
       const last = list[list.length - 1];
-      if (last) updateConvPreview(last, peer);
-      recomputeUnread(peer);
+      if (last) syncConvPreview(key);
+      recomputeUnread(key);
     }
   }
 
@@ -1410,7 +2137,7 @@
         }
       }
       if (!bubble.childNodes.length) bubble.textContent = '[图片]';
-      applyBubbleDecor(bubble, chatThemeFor(state.bot.id, msg.dir));
+      applyBubbleDecor(bubble, chatThemeFor(themeKey(), msg.dir));
       return bubble;
     }
 
@@ -1432,15 +2159,27 @@
         bubble.appendChild(chip);
       } else if (seg.type === 'at') {
         const chip = document.createElement('span');
-        chip.className = 'face-chip';
-        chip.textContent = '@' + (d.qq || '');
+        chip.className = 'face-chip at-chip';
+        chip.textContent = atLabel(d.qq);
         bubble.appendChild(chip);
       } else if (seg.type === 'record') {
         const chip = document.createElement('span');
         chip.className = 'face-chip';
         chip.textContent = '语音';
         bubble.appendChild(chip);
-      } else if (seg.type === 'forward' || seg.type === 'json') {
+      } else if (seg.type === 'json') {
+        // 「甩分享」卡片：解析得出来就画卡片，否则退回聊天记录提示
+        const card = parseShareCard(seg);
+        if (card) {
+          if (bubble.childNodes.length) bubble.appendChild(document.createElement('br'));
+          bubble.appendChild(makeShareCard(card));
+        } else {
+          const chip = document.createElement('span');
+          chip.className = 'face-chip';
+          chip.textContent = '[聊天记录]';
+          bubble.appendChild(chip);
+        }
+      } else if (seg.type === 'forward') {
         const chip = document.createElement('span');
         chip.className = 'face-chip';
         chip.textContent = '[聊天记录]';
@@ -1448,7 +2187,7 @@
       }
     }
     if (!bubble.childNodes.length) bubble.textContent = msg.text || '[消息]';
-    applyBubbleDecor(bubble, chatThemeFor(state.bot.id, msg.dir));
+    applyBubbleDecor(bubble, chatThemeFor(themeKey(), msg.dir));
     return bubble;
   }
 
@@ -1457,9 +2196,20 @@
     row.className = 'msg-row ' + (msg.dir === 'out' ? 'out' : 'in');
     if (msg.status === 'pending') row.classList.add('pending');
     if (msg.status === 'failed') row.classList.add('failed');
-    if (state.selected.has(msg.key)) row.classList.add('selected');
+    if (msg.selected || state.selected.has(msg.key)) row.classList.add('selected');
     row.dataset.key = msg.key;
     if (msg.mid) row.dataset.mid = msg.mid;
+
+    // 群里的系统消息（入群/改名/公告/踢人…）：居中提示，不带头像
+    if (msg.system) {
+      row.className = 'msg-row system';
+      const tip = document.createElement('div');
+      tip.className = 'system-tip';
+      tip.textContent = msg.text || '';
+      row.appendChild(tip);
+      row.addEventListener('contextmenu', (e) => e.preventDefault());
+      return row;
+    }
 
     if (msg.recalled) {
       row.classList.add('recalled');
@@ -1487,14 +2237,71 @@
       }
     });
 
+    // 头像：群里每条消息都带自己的发送者（头像 + 昵称 + 等级/角色）
+    const sender = msg.sender;
     const av = document.createElement('div');
     av.className = 'avatar ' + (msg.dir === 'out' ? 'me-avatar' : 'bot-avatar');
-    av.title = msg.dir === 'out' ? state.me.name : state.bot.name;
-    if (msg.dir === 'out') fillAvatar(av, state.me.name, state.me.id, '我');
-    else fillAvatar(av, state.bot.name, state.bot.id);
+    if (msg.dir === 'out') {
+      av.title = state.me.name;
+      fillAvatar(av, state.me.name, state.me.id, '我');
+    } else if (sender && sender.id) {
+      if (sender.role === 'system') {
+        av.title = '系统';
+        fillAvatar(av, '系统', '', '系');
+      } else {
+        av.title = sender.name;
+        fillAvatar(av, sender.name, sender.id);
+      }
+    } else if (isGroup()) {
+      // ★ 群里 sender 缺失时绝不能借用私聊角色 —— 那会把所有人都画成同一个
+      //   头像（实测：刷新进群后所有人头像都变成星野，切换会话后才恢复）。
+      av.title = '群成员';
+      fillAvatar(av, '群成员', '', '群');
+    } else {
+      av.title = state.bot.name;
+      fillAvatar(av, state.bot.name, state.bot.id);
+    }
 
     const body = document.createElement('div');
     body.className = 'msg-body';
+
+    // 群聊里每条消息上方显示「昵称 + 等级/角色标签」（像 QQ 群）
+    if (sender && !sender.system && (isGroup() || sender.id)) {
+      const head = document.createElement('div');
+      head.className = 'msg-sender';
+      const nm = document.createElement('span');
+      nm.className = 'ms-name';
+      nm.textContent = sender.name;
+      head.appendChild(nm);
+      const badge = senderBadge(sender);
+      if (badge) head.appendChild(badge);
+      body.appendChild(head);
+    }
+
+    // 引用回复：气泡上方一条「昵称 + 摘要」的引用块（点了跳到原消息）
+    if (msg.replyTo && (msg.replyTo.text || msg.replyTo.name)) {
+      const ref = document.createElement('div');
+      ref.className = 'quote-ref';
+      const nm = document.createElement('span');
+      nm.className = 'qr-name';
+      nm.textContent = msg.replyTo.name || '消息';
+      const tx = document.createElement('span');
+      tx.className = 'qr-text';
+      tx.textContent = msg.replyTo.text || '';
+      ref.append(nm, tx);
+      if (msg.replyTo.message_id) {
+        ref.addEventListener('click', () => {
+          const target = state.msgs.find((x) => x.mid === msg.replyTo.message_id);
+          const row2 = target && rowElOf(target);
+          if (!row2) { toast('被引用的消息不在当前加载范围'); return; }
+          row2.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          row2.classList.add('flash');
+          setTimeout(() => row2.classList.remove('flash'), 1200);
+        });
+      }
+      body.appendChild(ref);
+    }
+
     body.appendChild(buildBubble(msg));
     row.classList.toggle('has-tag', !!body.querySelector('.bubble-tag'));
 
@@ -1535,6 +2342,31 @@
       openCtx(e.clientX, e.clientY, msg);
     });
     return row;
+  }
+
+  // 群成员标签：群主 / 管理员 / LV 等级（QQ 群的味道）
+  function senderBadge(sender) {
+    if (!sender || sender.system) return null;
+    const wrap = document.createElement('span');
+    wrap.className = 'ms-badges';
+    let any = false;
+    const role = String(sender.role || '');
+    if (role === 'owner' || role === 'admin') {
+      const r = document.createElement('em');
+      r.className = 'ms-role ' + role;
+      r.textContent = role === 'owner' ? '群主' : '管理';
+      wrap.appendChild(r);
+      any = true;
+    }
+    const lv = Number(sender.level || 0);
+    if (lv > 0) {
+      const l = document.createElement('em');
+      l.className = 'ms-lv';
+      l.textContent = 'LV' + lv;
+      wrap.appendChild(l);
+      any = true;
+    }
+    return any ? wrap : null;
   }
 
   function appendSeparator(ts) {
@@ -1580,11 +2412,30 @@
     }
   }
 
-  function updateConvPreview(msg, peerId = state.bot.id) {
-    const meta = convMetaFor(peerId);
-    meta.preview = (msg.dir === 'out' ? '我：' : '') + previewOf(msg);
-    meta.ts = msg.ts;
+  // ★ 左侧列表预览的唯一真源 = 该会话里「真正最新的那条消息」。
+  //   之前预览有三个写入方（服务端 get_recent_contact 的 lastMsg、
+  //   历史合并后的最后一条、实时到达的那一条），彼此不核对 ——
+  //   「历史没新增」时（重启/二次同步很常见）服务端的旧 lastMsg 会一直
+  //   挂在左侧，于是左侧预览和右侧对话的最新消息对不上（实测 bug）。
+  function syncConvPreview(key = curConvKey()) {
+    const k = String(key);
+    const list = k === curConvKey() ? state.msgs : listFor(k);
+    if (!list.length) return;
+    let last = list[0];
+    for (const m of list) {
+      if (Number(m.ts || 0) >= Number(last.ts || 0)) last = m;
+    }
+    const meta = convMetaFor(k);
+    // 群消息预览带上说话人（像 QQ：「小星：今晚吃啥」）
+    const who = k.charAt(0) === 'g' && last.dir !== 'out' && last.sender
+      ? last.sender.name + '：' : (last.dir === 'out' ? '我：' : '');
+    meta.preview = who + previewOf(last);
+    meta.ts = last.ts;
     renderConvList();
+  }
+
+  function updateConvPreview(_msg, key = curConvKey()) {
+    syncConvPreview(key);        // 兼容旧调用点：一律重新推导
   }
 
   // ---------------------------------------------------------- 滚动 / 未读
@@ -1604,8 +2455,8 @@
     });
   }
 
-  function bumpUnread(peerId = state.bot.id) {
-    const meta = convMetaFor(peerId);
+  function bumpUnread(key = curConvKey()) {
+    const meta = convMetaFor(key);
     meta.unread = (meta.unread || 0) + 1;
     state.unread = totalUnread();
     updateBadges();
@@ -1613,9 +2464,9 @@
     updateDocTitle();
   }
 
-  function clearUnread(peerId = state.bot.id) {
-    markRead(peerId, 0);
-    const meta = convMetaFor(peerId);
+  function clearUnread(key = curConvKey()) {
+    markRead(key, 0);
+    const meta = convMetaFor(key);
     meta.unread = 0;
     state.unread = totalUnread();
     updateBadges();
@@ -1670,7 +2521,7 @@
 
   function sendText() {
     const text = els.input.value;
-    if (!text.trim()) return;
+    if (!text.trim() && !state.pendingMentions.length) return;
     if (!state.connected) {
       toast('还没连上，稍等一下再发');
       return;
@@ -1678,27 +2529,57 @@
     els.input.value = '';
     autosize();
     updateSendBtn();
-    doSend([{ type: 'text', data: { text } }], text);
+    // 群里 @ 的人转成 at 段一起发（后端靠 at 段判断「@ 了谁」）
+    const segs = isGroup() ? composeSegs(text) : [{ type: 'text', data: { text } }];
+    // 引用回复：reply 段放在最前面，后端据此把 reply_to 落库
+    const quoted = (isGroup() && state.replyTo && state.replyTo.mid) ? state.replyTo : null;
+    if (quoted) segs.unshift({ type: 'reply', data: { id: quoted.mid } });
+    // ★ QQ 的群引用会**顺手 @ 被引用的那个人**（对方收到提醒、也才知道你在回他）。
+    //   这里照做：没手动 @ 过同一个人时，自动补一个 at 段（排在 reply 段之后）。
+    if (quoted) {
+      const tgt = quoteAtTarget(quoted);
+      const already = segs.some((s) => s.type === 'at'
+        && String(s.data && s.data.qq) === String(tgt && tgt.id));
+      if (tgt && !already) {
+        segs.splice(1, 0, { type: 'at', data: { qq: atQqOf(tgt.id) } });
+      }
+    }
+    state.pendingMentions = [];
+    clearQuote();
+    doSend(segs, text, null, quoted);
     els.input.focus();
   }
 
-  async function doSend(sendSegs, text, displaySegs = null) {
+  // 发送目标参数：私聊 → send_msg + user_id；群聊 → send_group_msg + group_id
+  function sendTarget() {
+    if (isGroup()) {
+      return { action: 'send_group_msg', params: { group_id: state.peer.id } };
+    }
+    return {
+      action: 'send_msg',
+      params: { message_type: 'private', user_id: state.bot.id },
+    };
+  }
+
+  async function doSend(sendSegs, text, displaySegs = null, quoted = null) {
     if (!state.connected) {
       toast('还没连上，稍等一下再发');
       return;
     }
+    const t = sendTarget();
     const msg = addMsg(makeMsg({
       dir: 'out', segs: sendSegs, displaySegs,
       text: text || segsToText(displaySegs || sendSegs),
       ts: nowSec(), status: 'pending',
+      sender: isGroup()
+        ? { id: String(state.me.id), name: state.me.name, role: 'owner',
+            level: myGroupLevel() }
+        : null,
+      replyTo: quoted ? quoteLabelOf(quoted) : null,
     }));
     if (!msg) return;
     try {
-      const res = await call('send_msg', {
-        message_type: 'private',
-        user_id: state.bot.id,
-        message: sendSegs,
-      }, 25000);
+      const res = await call(t.action, { ...t.params, message: sendSegs }, 25000);
       if (!res || res.status !== 'ok') throw new Error(res?.wording || '发送失败');
       const mid = String(res?.data?.message_id || '');
       msg.mid = mid;
@@ -1718,9 +2599,8 @@
     msg.ts = nowSec();
     refreshRow(msg);
     try {
-      const res = await call('send_msg', {
-        message_type: 'private', user_id: state.bot.id, message: msg.segs,
-      }, 25000);
+      const t = sendTarget();
+      const res = await call(t.action, { ...t.params, message: msg.segs }, 25000);
       if (!res || res.status !== 'ok') throw new Error(res?.wording || '发送失败');
       msg.mid = String(res?.data?.message_id || '');
       if (msg.mid) state.byMid.set(msg.mid, msg);
@@ -1902,6 +2782,9 @@
   function visibleStickerGroups() {
     const all = state.stickers || [];
     if (state.stickerManage) return all;
+    // ★ 「这个对话可用的表情包」是按私聊角色配的。群聊不该套用上一个私聊
+    //   角色（实测会变成橘光的那套），群里的表情面板直接给全集。
+    if (isGroup()) return all;
     const allowed = state.stickerSets[String(state.bot.id)];
     if (!Array.isArray(allowed)) return all;
     return all.filter((g) => allowed.includes(g.key || g.name));
@@ -2349,12 +3232,17 @@
     state.ctxMsg = msg;
     els.moreMenu.classList.add('hidden');
     els.ctxMenu.classList.remove('hidden');
-    const btns = els.ctxMenu.querySelectorAll('button');
-    btns[1].classList.toggle('hidden', msg.dir !== 'out');
-    const recallBtn = els.ctxMenu.querySelector('button[data-act="recall"]');
-    if (recallBtn) {
-      recallBtn.classList.toggle('hidden', !msg.mid || !!msg.recalled);
-    }
+    const show = (act, on) => {
+      const b = els.ctxMenu.querySelector(`button[data-act="${act}"]`);
+      if (b) b.classList.toggle('hidden', !on);
+    };
+    const inGroup = isGroup();
+    show('quote', inGroup && !msg.system && !msg.recalled);
+    show('resend', msg.dir === 'out' && msg.status === 'failed');
+    // 群消息撤回后端还没打通（群消息 id 是 g<id>，撤回只认私聊），先隐藏
+    show('recall', !!msg.mid && !msg.recalled && !inGroup);
+    // 私聊 → 可把这段对话分享/转发到某个群（用户要的「抖进群里」）
+    show('shareGroup', !inGroup && !!state.groups.length);
     const rect = els.ctxMenu.getBoundingClientRect();
     const px = Math.min(x, window.innerWidth - rect.width - 8);
     const py = Math.min(y, window.innerHeight - rect.height - 8);
@@ -2376,34 +3264,38 @@
     closeCtx();
     if (!msg) return;
     if (act === 'copy') copyText(msg.text || previewOf(msg));
+    else if (act === 'quote') setQuote(msg);
     else if (act === 'resend') resend(msg);
     else if (act === 'recall') recallMessage(msg);
+    else if (act === 'shareGroup') openGroupPickerFor([msg]);
     else if (act === 'delete') {
-      state.msgs = state.msgs.filter((m) => m.key !== msg.key);
+      const i = state.msgs.findIndex((m) => m.key === msg.key);
+      if (i >= 0) state.msgs.splice(i, 1);
       if (msg.mid) state.byMid.delete(msg.mid);
       renderAll(false);
+      syncConvPreview();
       toast('已从本机删除（不影响 vol 的记忆）');
     }
   });
 
   // ---------------------------------------------------------- 多选 / 转发 / 撤回
-  function applyRecallLocally(msg, peerId, silent = false) {
+  function applyRecallLocally(msg, key, silent = false) {
     if (!msg || msg.recalled) return false;
-    const pid = Number(peerId || state.bot.id);
-    const isCurrent = pid === Number(state.bot.id);
-    const list = isCurrent ? state.msgs
-      : (state.charMsgs[pid] || []);
+    // 同样按「会话键」定位（撤回只有私聊走这条路，但别再拿 state.bot 当身份）
+    const k = String(key || curConvKey());
+    const isCurrent = k === curConvKey();
+    const list = isCurrent ? state.msgs : listFor(k);
     msg.recalled = msg.dir === 'out' ? 'me' : 'bot';
     state.selected.delete(msg.key);
     if (isCurrent) {
       refreshRow(msg);
       updateMultiBar();
       const last = list[list.length - 1];
-      if (last && last.key === msg.key) updateConvPreview(last, pid);
+      if (last && last.key === msg.key) syncConvPreview(k);
     } else {
       const last = list[list.length - 1];
-      if (last) updateConvPreview(last, pid);
-      recomputeUnread(pid);
+      if (last) syncConvPreview(k);
+      recomputeUnread(k);
     }
     if (!silent) {
       toast(msg.dir === 'out' ? '你撤回了一条消息' : '对方撤回了一条消息');
@@ -2451,7 +3343,7 @@
     state.marquee = {
       startX: e.clientX,
       startY: e.clientY,
-      pane: els.chatPane.getBoundingClientRect(),
+      pane: (els.chatMain || els.chatPane).getBoundingClientRect(),
       base: new Set(state.selected),
       active: false,
     };
@@ -2608,9 +3500,10 @@
   }
 
   function mergedForwardText(msgs) {
-    const lines = [`【聊天记录】与${state.bot.name}的聊天`];
+    const lines = [`【聊天记录】与${curPeerName()}的聊天`];
     for (const m of msgs) {
-      const who = m.dir === 'out' ? state.me.name : state.bot.name;
+      const who = m.dir === 'out' ? state.me.name
+        : (m.sender ? m.sender.name : curPeerName());
       lines.push(`${fmtClock(m.ts)} ${who}：${m.text || previewOf(m)}`);
     }
     return lines.join('\n');
@@ -2622,24 +3515,40 @@
     state.forwardMode = mode;
     els.forwardTitle.textContent = mode === 'merge' ? '合并转发到' : '逐条转发到';
     els.forwardList.innerHTML = '';
-    const targets = state.characters.filter((c) => c.id !== Number(state.bot.id));
-    for (const c of targets) {
+    const targets = [];
+    // 群聊排前面（转发到群里是用户最想要的），再是其他好友
+    for (const g of state.groups) {
+      targets.push({ kind: 'group', id: String(g.group_id), name: g.group_name || '群聊' });
+    }
+    for (const c of state.characters) {
+      if (isGroup() || c.id !== Number(state.bot.id)) {
+        targets.push({ kind: 'private', id: c.id, name: c.name });
+      }
+    }
+    for (const t of targets) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'forward-item';
       const av = document.createElement('div');
-      av.className = 'avatar bot-avatar';
-      fillAvatar(av, c.name, c.id);
+      av.className = 'avatar ' + (t.kind === 'group' ? 'group-avatar' : 'bot-avatar');
+      if (t.kind === 'group') fillGroupAvatar(av, t.name, t.id);
+      else fillAvatar(av, t.name, t.id);
       const name = document.createElement('span');
-      name.textContent = c.name;
+      name.textContent = t.name;
+      if (t.kind === 'group') {
+        const tag = document.createElement('em');
+        tag.className = 'forward-tag';
+        tag.textContent = '群';
+        name.appendChild(tag);
+      }
       btn.append(av, name);
-      btn.addEventListener('click', () => forwardTo(c.id));
+      btn.addEventListener('click', () => forwardTo(t));
       els.forwardList.appendChild(btn);
     }
     if (!targets.length) {
       const empty = document.createElement('p');
       empty.className = 'cs-hint';
-      empty.textContent = '还没有别的聊天对象，先添加一个角色吧。';
+      empty.textContent = '还没有别的聊天对象，先添加一个角色或建个群吧。';
       els.forwardList.appendChild(empty);
     }
     els.forwardMask.classList.remove('hidden');
@@ -2650,25 +3559,25 @@
     state.forwardMode = '';
   }
 
-  async function forwardTo(peerId) {
+  // 把选中的几条消息转发/分享到目标（群或好友）
+  async function forwardTo(target) {
     const msgs = selectedMsgs();
     const mode = state.forwardMode;
     if (!msgs.length) { closeForwardModal(); return; }
-    const target = state.characters.find((c) => c.id === Number(peerId));
+    const isGrp = target && target.kind === 'group';
+    const payloadBase = isGrp
+      ? { group_id: String(target.id) }
+      : { message_type: 'private', user_id: Number(target.id) };
+    const action = isGrp ? 'send_group_msg' : 'send_msg';
     try {
       if (mode === 'merge') {
-        await call('send_msg', {
-          message_type: 'private',
-          user_id: Number(peerId),
+        await call(action, {
+          ...payloadBase,
           message: [{ type: 'text', data: { text: mergedForwardText(msgs) } }],
         }, 25000);
       } else {
         for (const m of msgs) {
-          await call('send_msg', {
-            message_type: 'private',
-            user_id: Number(peerId),
-            message: forwardSegsFor(m),
-          }, 25000);
+          await call(action, { ...payloadBase, message: forwardSegsFor(m) }, 25000);
         }
       }
       toast(`已转发 ${msgs.length} 条给 ${target?.name || '对方'}`);
@@ -2677,6 +3586,39 @@
     } catch (e) {
       toast('转发失败：' + (e?.message || e));
     }
+  }
+
+  // 右键「分享到群」：选一个群，再把这几条消息转过去（友尽式打小报告的小道具）
+  function openGroupPickerFor(msgs) {
+    if (!state.groups.length) { toast('还没有群，先建一个群吧'); return; }
+    const chosen = msgs.filter((m) => m && !m.recalled);
+    if (!chosen.length) return;
+    els.forwardMask.classList.remove('hidden');
+    els.forwardTitle.textContent = '分享到群';
+    state.forwardMode = 'merge';
+    els.forwardList.innerHTML = '';
+    // 借用转发弹窗的选中集合不方便，这里直接用一次性的消息列表
+    const prevSel = state.selected;
+    state.selected = new Set(chosen.map((m) => m.key));
+    for (const g of state.groups) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'forward-item';
+      const av = document.createElement('div');
+      av.className = 'avatar group-avatar';
+      fillGroupAvatar(av, g.group_name || '群聊', g.group_id);
+      const name = document.createElement('span');
+      name.textContent = g.group_name || '群聊';
+      btn.append(av, name);
+      btn.addEventListener('click', async () => {
+        await forwardTo({ kind: 'group', id: String(g.group_id),
+                          name: g.group_name || '群聊' });
+        state.selected = prevSel;
+      });
+      els.forwardList.appendChild(btn);
+    }
+    els.forwardMask.addEventListener('click', () => { state.selected = prevSel; },
+      { once: true });
   }
 
   els.multiBar.addEventListener('click', (e) => {
@@ -2697,6 +3639,955 @@
   els.forwardMask.addEventListener('click', (e) => {
     if (e.target === els.forwardMask) closeForwardModal();
   });
+
+  // ---------------------------------------------------------- 群聊界面
+  // 右侧面板参考 QQ 的群资料页：入群申请 + 群公告 + 群聊成员。
+  // 群主能在面板上改名/发公告/开全员禁言/@人/设管理员/踢人。
+
+  function curGroupDetail() {
+    return isGroup() ? (state.groupDetail[String(state.peer.id)] || null) : null;
+  }
+
+  function renderGroupSide() {
+    if (!els.groupSide) return;
+    if (!isGroup() || state.groupSideHidden) {
+      els.groupSide.classList.add('hidden');
+      return;
+    }
+    els.groupSide.classList.remove('hidden');
+    const gid = String(state.peer.id);
+    const d = curGroupDetail();
+    const name = groupName(gid);
+    els.gsName.textContent = name;
+    fillGroupAvatar(els.gsAvatar, name, gid);
+    if (els.chatAvatar) fillGroupAvatar(els.chatAvatar, name, gid);
+    const count = d ? (d.member_count || (d.members || []).length)
+                    : ((groupById(gid) || {}).member_count || 0);
+    els.gsCount.textContent = `${count} 人` + ((d && d.mute_all) ? ' · 全员禁言中' : '');
+    els.gsAnnounce.textContent = ((d && (d.announce || {}).text) || '还没有群公告');
+    if (els.chatSub) {
+      els.chatSub.textContent = ((d && d.mute_all) ? '全员禁言中 · ' : '') + `${count} 人`;
+    }
+    renderGroupRequests();
+    renderGroupMembers();
+    renderGroupFiles();
+  }
+
+  function renderGroupRequests() {
+    if (!els.gsRequests) return;
+    const d = curGroupDetail();
+    const reqs = (d && d.pending) || [];
+    els.gsRequestCard.classList.toggle('hidden', !reqs.length);
+    if (els.gsRequestCount) els.gsRequestCount.textContent = String(reqs.length);
+    els.gsRequests.innerHTML = '';
+    for (const r of reqs) {
+      // ★ 后端库里存的是 uid；用 user_id 兜底（取不到就会把空 uid 发给后端，
+      //   结果点同意报「没有这个申请」）
+      const uid = String(r.user_id || r.uid || '');
+      const name = r.name || uid;
+      const row = document.createElement('div');
+      row.className = 'gs-req';
+      const av = document.createElement('div');
+      av.className = 'avatar bot-avatar';
+      fillAvatar(av, name, uid);
+      const info = document.createElement('div');
+      info.className = 'gs-req-info';
+      const nm = document.createElement('strong');
+      nm.textContent = name;
+      const note = document.createElement('span');
+      note.textContent = r.note || '想加入这个群';
+      info.append(nm, note);
+      const acts = document.createElement('div');
+      acts.className = 'gs-req-acts';
+      const ok = document.createElement('button');
+      ok.className = 'btn-primary mini-btn';
+      ok.textContent = '同意';
+      ok.addEventListener('click', () => resolveJoin(uid, true));
+      const no = document.createElement('button');
+      no.className = 'ghost mini-btn';
+      no.textContent = '拒绝';
+      no.addEventListener('click', () => resolveJoin(uid, false));
+      acts.append(ok, no);
+      row.append(av, info, acts);
+      els.gsRequests.appendChild(row);
+    }
+  }
+
+  async function resolveJoin(uid, approve) {
+    try {
+      await groupManage('resolve', {
+        group_id: state.peer.id, user_id: uid, approve,
+      });
+      await loadGroups();
+      renderConvList();
+      await loadGroupDetail(state.peer.id);
+      toast(approve ? '已同意入群' : '已拒绝申请');
+    } catch (e) { toast('操作失败：' + (e.message || e)); }
+  }
+
+  function renderGroupMembers() {
+    if (!els.gsMembers) return;
+    const d = curGroupDetail();
+    const members = (d && d.members) || [];
+    const q = ((els.gsMemberSearch && els.gsMemberSearch.value) || '').trim();
+    els.gsMembers.innerHTML = '';
+    if (els.gsMemberCount) els.gsMemberCount.textContent = String(members.length);
+    if (!members.length) {
+      const empty = document.createElement('p');
+      empty.className = 'cs-hint';
+      empty.textContent = '成员还没同步过来…';
+      els.gsMembers.appendChild(empty);
+      return;
+    }
+    for (const m of members) {
+      const name = m.nickname || String(m.user_id);
+      if (q && !name.includes(q)) continue;
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'gs-member';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      if (m.is_me || isOwner(m.user_id)) fillAvatar(av, state.me.name, state.me.id, '我');
+      else fillAvatar(av, name, m.user_id);
+      const info = document.createElement('div');
+      info.className = 'gs-member-info';
+      const nm = document.createElement('strong');
+      nm.textContent = name;
+      if (m.is_me || isOwner(m.user_id)) {
+        const me = document.createElement('em');
+        me.className = 'ms-role owner';
+        me.textContent = '我';
+        nm.appendChild(me);
+      }
+      info.appendChild(nm);
+      const sub = document.createElement('span');
+      const bits = [];
+      if (m.role === 'owner') bits.push('群主');
+      else if (m.role === 'admin') bits.push('管理员');
+      bits.push('LV' + Number(m.level || 1));
+      sub.textContent = bits.join(' · ');
+      info.appendChild(sub);
+      row.append(av, info);
+      if (String(m.role) !== 'owner' && !(m.is_me || isOwner(m.user_id))) {
+        const more = document.createElement('span');
+        more.className = 'gs-member-more';
+        more.innerHTML = '<svg><use href="#i-more"/></svg>';
+        row.appendChild(more);
+      }
+      row.addEventListener('click', (e) => openMemberMenu(e, m));
+      els.gsMembers.appendChild(row);
+    }
+  }
+
+  function openMemberMenu(e, m) {
+    e.stopPropagation();
+    if (m.role === 'owner' || isOwner(m.user_id)) return;
+    state.memberMenuFor = m;
+    if (els.mactAdminText) {
+      els.mactAdminText.textContent = m.role === 'admin' ? '取消管理员' : '设为管理员';
+    }
+    els.memberMenu.classList.remove('hidden');
+    const rect = els.memberMenu.getBoundingClientRect();
+    els.memberMenu.style.left =
+      Math.max(8, Math.min(e.clientX, window.innerWidth - rect.width - 8)) + 'px';
+    els.memberMenu.style.top =
+      Math.max(8, Math.min(e.clientY, window.innerHeight - rect.height - 8)) + 'px';
+  }
+
+  if (els.memberMenu) {
+    els.memberMenu.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-mact]');
+      if (!btn) return;
+      const m = state.memberMenuFor;
+      const act = btn.dataset.mact;
+      els.memberMenu.classList.add('hidden');
+      if (!m || !isGroup()) return;
+      if (act === 'at') atMember(m);
+      else if (act === 'admin') toggleAdmin(m);
+      else if (act === 'kick') kickMember(m);
+    });
+  }
+
+  function addMention(id, name) {
+    const sid = String(id);
+    if (state.pendingMentions.some((x) => String(x.id) === sid)) return;
+    state.pendingMentions.push({ id: sid, name });
+  }
+
+  function atMember(m) {
+    addMention(m.user_id, m.nickname || String(m.user_id));
+    insertAtCursor(`@${m.nickname || m.user_id} `);
+    els.input.focus();
+  }
+
+  function atAll() {
+    addMention('all', '全体成员');
+    insertAtCursor('@全体成员 ');
+    els.input.focus();
+  }
+
+  // @ 的显示名（把 at 段里的 QQ 号换成群名片）
+  function atLabel(qq) {
+    const s = String(qq);
+    if (s === 'all' || s === '-1' || s === '0') return '@全体成员';
+    const d = curGroupDetail();
+    const m = ((d && d.members) || []).find((x) => String(x.user_id) === s);
+    return '@' + (m ? (m.nickname || s) : s);
+  }
+
+  // 发送时把待发的 at 段拼到最前面（后端靠 at 段判断「@ 了谁」）
+  function composeSegs(text) {
+    const segs = [];
+    for (const m of state.pendingMentions) {
+      segs.push({ type: 'at', data: { qq: m.id === 'all' ? 'all' : Number(m.id) } });
+    }
+    segs.push({ type: 'text', data: { text: text || '' } });
+    return segs;
+  }
+
+  async function toggleAdmin(m) {
+    try {
+      await groupManage('admin', {
+        group_id: state.peer.id, user_id: m.user_id, on: m.role !== 'admin',
+      });
+      toast(m.role === 'admin' ? '已取消管理员' : '已设为管理员');
+    } catch (e) { toast('操作失败：' + (e.message || e)); }
+  }
+
+  async function kickMember(m) {
+    const name = m.nickname || m.user_id;
+    if (!window.confirm(`把「${name}」移出群聊？`)) return;
+    try {
+      await groupManage('kick', { group_id: state.peer.id, user_id: m.user_id });
+      await loadGroups();
+      renderConvList();
+      await loadGroupDetail(state.peer.id);
+      toast(`已把 ${name} 移出群聊`);
+    } catch (e) { toast('操作失败：' + (e.message || e)); }
+  }
+
+  // ---- 引用回复 ----
+
+  function quoteLabelOf(msg) {
+    if (!msg) return { name: '', text: '' };
+    const name = msg.dir === 'out' ? state.me.name
+      : (msg.sender ? msg.sender.name : state.bot.name);
+    return { name, text: previewOf(msg) };
+  }
+
+  function setQuote(msg) {
+    if (!msg || !msg.mid) { toast('这条消息还没消息 ID，无法引用'); return; }
+    state.replyTo = msg;
+    renderQuoteBar();
+    els.input.focus();
+  }
+
+  // 引用时该 @ 谁：QQ 的群引用会自动 @ 被引用消息的发送者。
+  // 引用自己发的不加 @（不给自己发提醒）；系统消息没有发送者，也不加。
+  function quoteAtTarget(msg) {
+    if (!msg || msg.system) return null;
+    const sid = msg.sender ? String(msg.sender.id || '') : '';
+    if (!sid || sid === String(state.me.id) || isOwner(sid)) return null;
+    return { id: sid, name: (msg.sender && msg.sender.name) || sid };
+  }
+
+  // at 段的 qq 字段：能转数字就转（和手动 @ 的写法保持一致），否则原样
+  function atQqOf(id) {
+    const s = String(id || '');
+    return /^\d+$/.test(s) ? Number(s) : s;
+  }
+
+  function clearQuote() {
+    state.replyTo = null;
+    renderQuoteBar();
+  }
+
+  function renderQuoteBar() {
+    if (!els.quoteBar) return;
+    const q = state.replyTo;
+    if (!q) {
+      els.quoteBar.classList.add('hidden');
+      return;
+    }
+    const label = quoteLabelOf(q);
+    els.qbName.textContent = label.name;
+    els.qbText.textContent = label.text;
+    els.quoteBar.classList.remove('hidden');
+  }
+
+  if (els.qbClose) els.qbClose.addEventListener('click', clearQuote);
+
+  // ---- 群文件 / 群相册 ----
+
+  async function loadGroupFiles(gid) {
+    const g = String(gid || '');
+    if (!g) return;
+    try {
+      const res = await apiFetch(
+        `/api/groups/files?group_id=${encodeURIComponent(g)}`,
+        { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      state.groupFiles[g] = (data && data.files) || [];
+      if (isGroup() && String(state.peer.id) === g) renderGroupFiles();
+    } catch (e) { /* 老服务端没有这个接口 */ }
+  }
+
+  function fileUrl(it) {
+    return `/api/groups/file?group_id=${encodeURIComponent(state.peer.id)}`
+      + `&file_id=${encodeURIComponent(it.id)}`;
+  }
+
+  function fmtSize(n) {
+    const v = Number(n || 0);
+    if (v >= 1048576) return (v / 1048576).toFixed(1) + ' MB';
+    if (v >= 1024) return (v / 1024).toFixed(0) + ' KB';
+    return v + ' B';
+  }
+
+  function renderGroupFiles() {
+    if (!els.gsFiles || !isGroup()) return;
+    const items = state.groupFiles[String(state.peer.id)] || [];
+    const album = state.groupFileTab === 'album';
+    const list = items.filter((it) => (album ? it.kind === 'image' : true));
+    if (els.gsFileCount) els.gsFileCount.textContent = String(items.length);
+    els.gsFiles.innerHTML = '';
+    if (!list.length) {
+      const empty = document.createElement('p');
+      empty.className = 'cs-hint';
+      empty.textContent = album ? '群相册还是空的' : '还没有群文件';
+      els.gsFiles.appendChild(empty);
+      return;
+    }
+    if (album) {
+      const grid = document.createElement('div');
+      grid.className = 'gs-album';
+      for (const it of list) {
+        if (it.kind !== 'image') continue;
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = it.name;
+        img.src = fileUrl(it);
+        img.addEventListener('click', () => openLightbox(fileUrl(it)));
+        grid.appendChild(img);
+      }
+      els.gsFiles.appendChild(grid);
+      return;
+    }
+    for (const it of list) {
+      const row = document.createElement('div');
+      row.className = 'gs-file';
+      const ico = document.createElement('span');
+      ico.className = 'gs-file-ico';
+      ico.innerHTML = `<svg><use href="#i-${it.kind === 'image' ? 'image' : 'folder'}"/></svg>`;
+      const info = document.createElement('div');
+      info.className = 'gs-file-info';
+      const nm = document.createElement('strong');
+      nm.textContent = it.name;
+      const sub = document.createElement('span');
+      sub.textContent = `${fmtSize(it.size)} · ${it.uploader || ''}`;
+      info.append(nm, sub);
+      const dl = document.createElement('a');
+      dl.className = 'gs-file-dl';
+      dl.href = fileUrl(it);
+      dl.setAttribute('download', it.name);
+      dl.title = '下载';
+      dl.innerHTML = '<svg><use href="#i-download"/></svg>';
+      row.append(ico, info, dl);
+      if (it.uploader && it.uploader === state.me.name) {
+        const del = document.createElement('button');
+        del.className = 'gs-file-del';
+        del.title = '删除';
+        del.innerHTML = '<svg><use href="#i-trash"/></svg>';
+        del.addEventListener('click', () => deleteGroupFile(it));
+        row.appendChild(del);
+      }
+      els.gsFiles.appendChild(row);
+    }
+  }
+
+  async function uploadGroupFiles(files) {
+    if (!isGroup() || !files.length) return;
+    // ★ 群号要**先抓下来**：下面每个文件都要 await 一次上传，如果在上传途中
+    //   用户切到了别的会话，`state.peer.id` 就变了，后面的文件会被传到别的群。
+    const gid = String(state.peer.id);
+    let ok = 0;
+    for (const f of files) {
+      if (f.size > 20 * 1024 * 1024) { toast(`「${f.name}」超过 20MB，跳过`); continue; }
+      try {
+        const dataUrl = await readDataURL(f);
+        const res = await apiFetch('/api/groups/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ group_id: gid, name: f.name, data: dataUrl }),
+        });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok || !out.ok) throw new Error(out.error || ('HTTP ' + res.status));
+        ok += 1;
+      } catch (e) {
+        toast(`「${f.name}」上传失败：` + (e.message || e));
+      }
+    }
+    if (ok) {
+      toast(`已上传 ${ok} 个文件`);
+      await loadGroupFiles(gid);
+    }
+  }
+
+  async function deleteGroupFile(it) {
+    if (!window.confirm(`删除群文件「${it.name}」？`)) return;
+    const gid = String(state.peer.id);
+    try {
+      const res = await apiFetch('/api/groups/files/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: gid, file_id: it.id }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok || !out.ok) throw new Error(out.error || ('HTTP ' + res.status));
+      toast('已删除');
+      await loadGroupFiles(gid);
+    } catch (e) { toast('删除失败：' + (e.message || e)); }
+  }
+
+  if (els.gsUpload) els.gsUpload.addEventListener('click', () => {
+    if (!isGroup()) return;
+    els.gsFileInput.value = '';
+    els.gsFileInput.click();
+  });
+  if (els.gsFileInput) els.gsFileInput.addEventListener('change', () => {
+    const files = [...(els.gsFileInput.files || [])];
+    els.gsFileInput.value = '';
+    uploadGroupFiles(files);
+  });
+  if (els.gsFileTabs) els.gsFileTabs.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-ftab]');
+    if (!b) return;
+    state.groupFileTab = b.dataset.ftab;
+    els.gsFileTabs.querySelectorAll('button').forEach((x) => {
+      x.classList.toggle('active', x === b);
+    });
+    renderGroupFiles();
+  });
+
+  // ---- 建群 / 邀请 ----
+
+  function memberPicker(container, opts) {
+    container.innerHTML = '';
+    const inGroup = new Set((opts.existing || []).map(String));
+    const picked = new Set();
+    for (const c of state.characters) {
+      if (c.id === Number(state.bot.id) && !opts.includeCurrent) continue;
+      const cid = String(c.id);
+      const already = inGroup.has(cid);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cg-member';
+      btn.dataset.cid = cid;
+      const av = document.createElement('div');
+      av.className = 'avatar bot-avatar';
+      fillAvatar(av, c.name, c.id);
+      const name = document.createElement('span');
+      name.textContent = c.name;
+      const tick = document.createElement('i');
+      tick.className = 'cg-tick';
+      tick.innerHTML = '<svg><use href="#i-check"/></svg>';
+      if (already) {
+        const tag = document.createElement('em');
+        tag.className = 'cg-tag';
+        tag.textContent = '已在群';
+        btn.append(av, name, tag);
+        btn.disabled = true;
+      } else {
+        btn.append(av, name, tick);
+        btn.addEventListener('click', () => {
+          if (picked.has(cid)) {
+            picked.delete(cid);
+            btn.classList.remove('on');
+          } else {
+            picked.add(cid);
+            btn.classList.add('on');
+          }
+        });
+      }
+      container.appendChild(btn);
+    }
+    if (!container.childNodes.length) {
+      const empty = document.createElement('p');
+      empty.className = 'cs-hint';
+      empty.textContent = '还没有可邀请的好友。';
+      container.appendChild(empty);
+    }
+    return picked;
+  }
+
+  function openCreateGroup() {
+    if (!state.characters.length) { toast('先添加一个角色吧'); return; }
+    els.cgName.value = '';
+    memberPicker(els.cgMembers, { includeCurrent: false });
+    els.createGroupMask.classList.remove('hidden');
+    setTimeout(() => els.cgName.focus(), 50);
+  }
+
+  function closeCreateGroup() {
+    els.createGroupMask.classList.add('hidden');
+  }
+
+  async function createGroupNow() {
+    const name = els.cgName.value.trim();
+    if (!name) { toast('先给群起个名字'); els.cgName.focus(); return; }
+    const memberIds = [...els.cgMembers.querySelectorAll('.cg-member.on')]
+      .map((b) => Number(b.dataset.cid)).filter(Boolean);
+    els.cgCreate.disabled = true;
+    try {
+      const res = await apiFetch('/api/groups/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, members: memberIds }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data || data.ok === false) {
+        throw new Error((data && data.error) || '创建失败');
+      }
+      if (data.group_id) {
+        state.groupDetail[String(data.group_id)] = data;
+        syncGroupSummary(data);
+      }
+      await loadGroups();
+      closeCreateGroup();
+      renderConvList();
+      renderContactList();
+      if (data.group_id) selectPeer('group', data.group_id);
+      toast('群已创建');
+    } catch (e) {
+      toast('创建失败：' + (e.message || e));
+    } finally {
+      els.cgCreate.disabled = false;
+    }
+  }
+
+  async function openInvite() {
+    if (!isGroup()) return;
+    // ★ 先把群详情拿到手再建选择器 —— 以前详情还在路上时 members 是空的，
+    //   于是「已在群」的标记全失，已经在群里的人也会出现在可邀请列表里。
+    await loadGroupDetail(state.peer.id, { render: false });
+    const d = curGroupDetail();
+    if (!d || !(d.members || []).length) {
+      toast('成员还没同步过来，稍等一下再点');
+      return;
+    }
+    const existing = (d.members || []).map((m) => String(m.user_id));
+    const picked = memberPicker(els.inviteMembers, { existing, includeCurrent: true });
+    els.inviteMask.classList.remove('hidden');
+    state.invitePicked = picked;
+  }
+
+  async function inviteNow() {
+    const picked = state.invitePicked;
+    els.inviteMask.classList.add('hidden');
+    if (!picked || !picked.size) return;
+    const d = curGroupDetail();
+    const already = new Set(((d && d.members) || []).map((m) => String(m.user_id)));
+    const targets = [...picked].filter((uid) => !already.has(String(uid)));
+    if (!targets.length) { toast('选的人都已经在群里了'); return; }
+    // ★ 群号先抓下来：循环里有 await，切会话后 state.peer.id 会变
+    const gid = String(state.peer.id);
+    let ok = 0;
+    for (const uid of targets) {
+      try {
+        await groupManage('invite', {
+          group_id: gid, user_id: uid,
+          name: (state.characters.find((c) => String(c.id) === String(uid)) || {}).name || uid,
+        });
+        ok += 1;
+      } catch (e) {
+        toast(`「${uid}」邀请失败：` + (e.message || e));
+      }
+    }
+    await loadGroups();
+    await loadGroupDetail(gid);
+    renderConvList();
+    if (ok) toast(`已邀请 ${ok} 位好友入群`);
+  }
+
+  // ---- 群设置 / 公告 ----
+
+  function openGroupSet() {
+    if (!isGroup()) return;
+    const d = curGroupDetail();
+    const gid = String(state.peer.id);
+    els.gsSetName.value = (d && d.group_name) || groupName(gid);
+    els.gsSetMute.checked = !!(d && d.mute_all);
+    els.gsSetSearch.checked = !d || !!d.searchable;
+    els.gsSetGid.textContent = gid;
+    if (els.gsSetAvatarPreview) {
+      fillGroupAvatar(els.gsSetAvatarPreview, groupName(gid), gid);
+    }
+    renderGroupLimits();
+    els.groupSetMask.classList.remove('hidden');
+  }
+
+  function closeGroupSet() { els.groupSetMask.classList.add('hidden'); }
+
+  async function saveGroupName() {
+    const name = els.gsSetName.value.trim();
+    if (!name) { toast('群名不能为空'); return; }
+    try {
+      await groupManage('rename', { group_id: state.peer.id, name });
+      await loadGroups();
+      applyPeerIdentity();
+      toast('群名已修改');
+    } catch (e) { toast('改名失败：' + (e.message || e)); }
+  }
+
+  async function toggleGroupMute(on) {
+    try {
+      await groupManage('mute', { group_id: state.peer.id, on });
+      await loadGroups();
+      applyPeerIdentity();
+      toast(on ? '已开启全员禁言' : '已解除全员禁言');
+    } catch (e) {
+      els.gsSetMute.checked = !on;
+      toast('操作失败：' + (e.message || e));
+    }
+  }
+
+  async function toggleGroupSearch(on) {
+    try {
+      await groupManage('searchable', { group_id: state.peer.id, on });
+      toast(on ? '已允许被搜索加入' : '已关闭搜索加入');
+    } catch (e) {
+      els.gsSetSearch.checked = !on;
+      toast('操作失败：' + (e.message || e));
+    }
+  }
+
+  function openAnnounce() {
+    if (!isGroup()) return;
+    const d = curGroupDetail();
+    els.announceInput.value = ((d && (d.announce || {}).text) || '');
+    els.announceMask.classList.remove('hidden');
+    setTimeout(() => els.announceInput.focus(), 50);
+  }
+
+  function closeAnnounce() { els.announceMask.classList.add('hidden'); }
+
+  async function saveAnnounce() {
+    const text = els.announceInput.value.trim();
+    if (!text) { toast('公告不能为空'); return; }
+    try {
+      await groupManage('announce', { group_id: state.peer.id, text });
+      await loadGroupDetail(state.peer.id);
+      closeAnnounce();
+      toast('公告已发布，群成员都会看到');
+    } catch (e) { toast('发布失败：' + (e.message || e)); }
+  }
+
+  // ---- 群界面事件绑定 ----
+  function closeGroupSide() {
+    els.groupSide.classList.add('hidden');
+    els.groupSide.classList.remove('mobile-open');
+    state.groupSideHidden = true;
+  }
+  function toggleGroupSide() {
+    if (!isGroup()) return;
+    const mobile = window.matchMedia('(max-width: 880px)').matches;
+    const open = !els.groupSide.classList.contains('hidden') &&
+      (!mobile || els.groupSide.classList.contains('mobile-open'));
+    if (open) {
+      closeGroupSide();
+      return;
+    }
+    state.groupSideHidden = false;
+    els.groupSide.classList.remove('hidden');
+    if (mobile) els.groupSide.classList.add('mobile-open');
+    renderGroupSide();
+  }
+  if (els.gsClose) els.gsClose.addEventListener('click', closeGroupSide);
+  if (els.chatAvatar) els.chatAvatar.addEventListener('click', toggleGroupSide);
+  if (els.gsAnnounceEdit) els.gsAnnounceEdit.addEventListener('click', openAnnounce);
+  if (els.gsInvite) els.gsInvite.addEventListener('click', openInvite);
+  if (els.gsMemberSearch) els.gsMemberSearch.addEventListener('input', renderGroupMembers);
+  if (els.btnGroupAt) els.btnGroupAt.addEventListener('click', () => {
+    if (!isGroup()) return;
+    els.memberMenu.classList.add('hidden');
+    atAll();
+  });
+  if (els.btnGroupSet) els.btnGroupSet.addEventListener('click', openGroupSet);
+
+  els.cgClose.addEventListener('click', closeCreateGroup);
+  els.cgCancel.addEventListener('click', closeCreateGroup);
+  els.createGroupMask.addEventListener('click', (e) => {
+    if (e.target === els.createGroupMask) closeCreateGroup();
+  });
+  els.cgCreate.addEventListener('click', createGroupNow);
+  els.cgName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); createGroupNow(); }
+  });
+
+  els.inviteClose.addEventListener('click', () => els.inviteMask.classList.add('hidden'));
+  els.inviteMask.addEventListener('click', (e) => {
+    if (e.target === els.inviteMask) els.inviteMask.classList.add('hidden');
+  });
+  els.inviteDone.addEventListener('click', inviteNow);
+
+  els.gsSetClose.addEventListener('click', closeGroupSet);
+  els.groupSetMask.addEventListener('click', (e) => {
+    if (e.target === els.groupSetMask) closeGroupSet();
+  });
+  els.gsSetSaveName.addEventListener('click', saveGroupName);
+  els.gsSetName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveGroupName(); }
+  });
+  els.gsSetMute.addEventListener('change', () => toggleGroupMute(els.gsSetMute.checked));
+  els.gsSetSearch.addEventListener('change', () => toggleGroupSearch(els.gsSetSearch.checked));
+  // ---- 群聊节奏参数（滑杆，像私聊的「热情/好感」）----
+
+  function renderGroupLimits() {
+    if (!els.gsLimits || !isGroup()) return;
+    const d = curGroupDetail();
+    const specs = (d && d.limits) || [];
+    els.gsLimits.innerHTML = '';
+    if (!specs.length) {
+      const empty = document.createElement('p');
+      empty.className = 'cs-hint';
+      empty.textContent = '参数还没读上来…';
+      els.gsLimits.appendChild(empty);
+      return;
+    }
+    for (const it of specs) {
+      if (it.kind === 'bool') {
+        const row = document.createElement('label');
+        row.className = 'setting-row compact';
+        const box = document.createElement('div');
+        box.innerHTML = `<strong>${it.label}</strong>`;
+        const sw = document.createElement('label');
+        sw.className = 'switch';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = Number(it.value) > 0;
+        cb.addEventListener('change', () => saveGroupLimit(it.key, cb.checked ? 1 : 0));
+        const knob = document.createElement('i');
+        sw.append(cb, knob);
+        row.append(box, sw);
+        els.gsLimits.appendChild(row);
+        continue;
+      }
+      const label = document.createElement('label');
+      label.className = 'trait-row';
+      const nm = document.createElement('span');
+      nm.className = 'trait-name';
+      nm.textContent = it.label;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = String(it.min);
+      input.max = String(it.max);
+      input.step = String(it.step || 1);
+      input.value = String(it.value);
+      input.dataset.limitKey = it.key;
+      const val = document.createElement('span');
+      val.className = 'trait-val';
+      val.textContent = `${it.value}${it.unit || ''}`;
+      input.addEventListener('input', () => {
+        val.textContent = `${input.value}${it.unit || ''}`;
+      });
+      // 松手才写后端（拖动时不要连发）
+      input.addEventListener('change', () => saveGroupLimit(it.key, Number(input.value)));
+      label.append(nm, input, val);
+      els.gsLimits.appendChild(label);
+    }
+  }
+
+  async function saveGroupLimit(key, value) {
+    if (!isGroup() || !key) return;
+    try {
+      await groupManage('limits', {
+        group_id: state.peer.id, values: { [key]: value },
+      });
+      toast('已保存');
+    } catch (e) {
+      toast('保存失败：' + (e.message || e));
+      await loadGroupDetail(state.peer.id);
+    }
+  }
+
+  if (els.gsSetAvatar) els.gsSetAvatar.addEventListener('click', () => {
+    state.avatarTarget = { kind: 'group', id: state.peer.id };
+    els.groupAvatarInput.value = '';
+    els.groupAvatarInput.click();
+  });
+  if (els.gsSetAvatarPreview) {
+    els.gsSetAvatarPreview.addEventListener('click', () => {
+      state.avatarTarget = { kind: 'group', id: state.peer.id };
+      els.groupAvatarInput.value = '';
+      els.groupAvatarInput.click();
+    });
+  }
+  els.groupAvatarInput.addEventListener('change', () => {
+    const f = els.groupAvatarInput.files && els.groupAvatarInput.files[0];
+    if (f) startAvatarCrop(f);
+  });
+
+  els.announceClose.addEventListener('click', closeAnnounce);
+  els.announceCancel.addEventListener('click', closeAnnounce);
+  els.announceMask.addEventListener('click', (e) => {
+    if (e.target === els.announceMask) closeAnnounce();
+  });
+  els.announceSave.addEventListener('click', saveAnnounce);
+
+  // ---------------------------------------------------------- 在线状态（QQ 式）
+  // 入口在「已连接」左边那颗状态胶囊（桌面）；移动端在顶部自己名字下面。
+  // 状态是**主动性的乘数** —— 「Q我吧」会让她更主动地来找你，
+  // 「离线 / 隐身」只是安静一点（不是不发），「请勿打扰」才真的完全不主动。
+  // 图标一律用平面线性图标（#i-p-<key>），不用 emoji。
+  const PRESENCE_FALLBACK = [
+    { key: 'online', label: '在线', desc: '随时可以来找我', freq: 1 },
+    { key: 'qme', label: 'Q我吧', desc: '我现在有空，来找我聊', freq: 2 },
+    { key: 'away', label: '离开', desc: '暂时不在，稍微安静一点', freq: 0.6 },
+    { key: 'busy', label: '忙碌', desc: '在忙，消息少一点', freq: 0.4 },
+    { key: 'dnd', label: '请勿打扰', desc: '先别来打扰', freq: 0.12, silent: true },
+    { key: 'invisible', label: '隐身', desc: '想安静待着，但别断联', freq: 0.35 },
+    { key: 'offline', label: '离线', desc: '下线了，留言就好', freq: 0.25 },
+  ];
+
+  function presenceList() {
+    return (state.presence && state.presence.statuses) || PRESENCE_FALLBACK;
+  }
+
+  function presenceIcon(key) {
+    return '#i-p-' + (key || 'online');
+  }
+
+  // 建一个平面图标（<svg><use href="#i-p-xxx"/></svg>）
+  function presenceSvg(key, cls) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    if (cls) svg.setAttribute('class', cls);
+    const use = document.createElementNS(NS, 'use');
+    use.setAttribute('href', presenceIcon(key));
+    svg.appendChild(use);
+    return svg;
+  }
+
+  function applyPresenceUI() {
+    const p = state.presence;
+    if (!p) return;
+    if (els.railDot) els.railDot.dataset.p = p.status;
+    if (els.mobileDot) els.mobileDot.dataset.p = p.status;
+    if (els.mobileStatus) els.mobileStatus.textContent = p.label;
+    if (els.mobileStatus) {
+      const line = els.mobileStatus.closest('.mh-status');
+      if (line) line.classList.toggle('ok', p.status === 'online' || p.status === 'qme');
+    }
+    if (els.railAvatar) els.railAvatar.title = `我（${p.label}）`;
+    // 「已连接」左边那颗胶囊：图标 + 文字都跟着状态走
+    if (els.presenceChip) {
+      els.presenceChip.dataset.p = p.status;
+      const use = els.presenceChip.querySelector('use');
+      if (use) use.setAttribute('href', presenceIcon(p.status));
+      if (els.presenceChipText) els.presenceChipText.textContent = p.label;
+      els.presenceChip.title = `在线状态：${p.label}（${p.desc || ''}）`;
+    }
+  }
+
+  async function loadPresence() {
+    try {
+      const res = await apiFetch('/api/presence', { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) return;
+      state.presence = data;
+      applyPresenceUI();
+    } catch (e) { /* 静默：在线状态是锦上添花，取不到也不影响聊天 */ }
+  }
+
+  async function savePresence(key) {
+    if (!key) return;
+    try {
+      const res = await apiFetch('/api/presence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: key }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok || !out.ok) throw new Error(out.error || ('HTTP ' + res.status));
+      state.presence = out;
+      applyPresenceUI();
+      toast(out.silent ? `已切换为「${out.label}」· 先安静一会儿`
+                       : `已切换为「${out.label}」`);
+    } catch (e) {
+      toast('切换失败：' + (e?.message || e));
+    }
+  }
+
+  function openPresenceMenu(anchorEl, mode) {
+    closeCtx();
+    const cur = state.presence ? state.presence.status : 'online';
+    els.presenceMenu.innerHTML = '';
+    const head = document.createElement('div');
+    head.className = 'pm-head';
+    head.textContent = '在线状态';
+    els.presenceMenu.appendChild(head);
+
+    for (const s of presenceList()) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pm-item' + (s.key === cur ? ' active' : '');
+      b.dataset.p = s.key;
+      const ico = presenceSvg(s.key, 'pm-ico');
+      const text = document.createElement('span');
+      text.className = 'pm-text';
+      const label = document.createElement('span');
+      label.className = 'pm-label';
+      label.textContent = s.label || s.key;
+      const desc = document.createElement('span');
+      desc.className = 'pm-desc';
+      desc.textContent = s.desc || '';
+      text.appendChild(label);
+      text.appendChild(desc);
+      b.appendChild(ico);
+      b.appendChild(text);
+      if (s.freq != null && s.key !== cur) {
+        const freq = document.createElement('span');
+        freq.className = 'pm-freq';
+        freq.textContent = '×' + s.freq;
+        b.appendChild(freq);
+      }
+      b.addEventListener('click', () => {
+        els.presenceMenu.classList.add('hidden');
+        savePresence(s.key);
+      });
+      els.presenceMenu.appendChild(b);
+    }
+
+    els.presenceMenu.classList.remove('hidden');
+    const a = anchorEl.getBoundingClientRect();
+    const r = els.presenceMenu.getBoundingClientRect();
+    let px = mode === 'below' ? a.left : a.right + 10;
+    let py = mode === 'below' ? a.bottom + 6 : a.top - 6;
+    px = Math.max(8, Math.min(px, window.innerWidth - r.width - 8));
+    py = Math.max(8, Math.min(py, window.innerHeight - r.height - 8));
+    els.presenceMenu.style.left = px + 'px';
+    els.presenceMenu.style.top = py + 'px';
+  }
+
+  function togglePresenceMenu(anchorEl, mode) {
+    if (els.presenceMenu.classList.contains('hidden')) openPresenceMenu(anchorEl, mode);
+    else els.presenceMenu.classList.add('hidden');
+  }
+
+  if (els.presenceChip) {
+    // 入口：主界面「已连接」左边那颗状态胶囊
+    els.presenceChip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePresenceMenu(els.presenceChip, 'below');
+    });
+  }
+  if (els.mobilePresence) {
+    els.mobilePresence.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePresenceMenu(els.mobilePresence, 'below');
+    });
+  }
 
   // ---------------------------------------------------------- 更多 / 设置
   function openMoreMenu() {
@@ -2721,7 +4612,12 @@
     const act = btn.dataset.act;
     closeCtx();
     if (act === 'chatStyle') {
-      openChatSettings();
+      // ★ 群聊里没有「按对话的气泡设置」——以前这里会打开 state.bot（＝上一个
+      //   私聊角色，实测是橘光）的设置页。群里改走群设置。
+      if (isGroup()) openGroupSet();
+      else openChatSettings();
+    } else if (act === 'createGroup') {
+      openCreateGroup();
     } else if (act === 'multiselect') {
       enterSelectMode();
     } else if (act === 'stickerManage') {
@@ -2732,9 +4628,12 @@
     } else if (act === 'clear') {
       if (!state.msgs.length) { toast('没有可清空的消息'); return; }
       if (confirm('清空本机显示？不会删除 vol 的记忆和聊天记录。')) {
-        state.msgs = [];
+        // ★ 原地清空而不是换一个新数组 —— state.msgs 与它所属会话的缓存
+        //   是同一个数组，换成新数组会让两边的引用脱钩（切走切回又冒出旧消息）
+        state.msgs.length = 0;
         state.byMid.clear();
         renderAll(false);
+        syncConvPreview();
       }
     } else if (act === 'stapxs') {
       window.open('/stapxs/', '_blank');
@@ -2927,16 +4826,14 @@
   // ---------------------------------------------------------- 更换头像（QQ 式裁剪）
   const AVATAR_PX = 256;
 
-  function openAvatarPicker() {
-    els.avatarFileInput.value = '';
-    els.avatarFileInput.click();
-  }
-
   function closeAvatarCrop() {
     els.avatarMask.classList.add('hidden');
     const c = state.avatarCrop;
     if (c && c.url) URL.revokeObjectURL(c.url);
     state.avatarCrop = null;
+    // 目标也要清掉：否则下一次换别人头像时会误用上一次的目标（比如把群里
+    // 的头像存到某个角色身上）
+    state.avatarTarget = null;
     els.avatarCropImg.removeAttribute('src');
     els.avatarCropImg.removeAttribute('style');
   }
@@ -3033,20 +4930,31 @@
   }
 
   async function saveAvatar(dataUrl) {
+    const tgt = state.avatarTarget;
+    const isGrp = !!(tgt && tgt.kind === 'group');
+    const key = isGrp ? ('g' + tgt.id) : String(state.bot.id);
     try {
       const res = await apiFetch('/api/avatar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ peer_id: state.bot.id, data: dataUrl }),
+        body: JSON.stringify({ peer_id: key, data: dataUrl }),
       });
       const out = await res.json().catch(() => ({}));
       if (!res.ok || !out.ok) throw new Error(out.error || ('HTTP ' + res.status));
-      state.avatars[String(state.bot.id)] = out.url ||
-        `/api/avatar?peer_id=${state.bot.id}&v=${Date.now()}`;
+      state.avatars[key] = out.url ||
+        `/api/avatar?peer_id=${encodeURIComponent(key)}&v=${Date.now()}`;
       closeAvatarCrop();
-      refreshBotAvatars();
-      applyFavicon();
-      toast('头像已更新');
+      state.avatarTarget = null;
+      if (isGrp) {
+        renderGroupSide();
+        renderConvList();
+        renderContactList();
+        toast('群头像已更新');
+      } else {
+        refreshBotAvatars();
+        applyFavicon();
+        toast('头像已更新');
+      }
     } catch (e) {
       toast('头像保存失败：' + (e?.message || e));
     }
@@ -3054,36 +4962,54 @@
 
   async function resetAvatar() {
     if (!state.bot.id) return;
+    const tgt = state.avatarTarget;
+    const isGrp = !!(tgt && tgt.kind === 'group');
+    const key = isGrp ? ('g' + tgt.id) : String(state.bot.id);
     try {
       const res = await apiFetch('/api/avatar/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ peer_id: state.bot.id }),
+        body: JSON.stringify({ peer_id: key }),
       });
       const out = await res.json().catch(() => ({}));
       if (!res.ok || !out.ok) throw new Error(out.error || ('HTTP ' + res.status));
-      delete state.avatars[String(state.bot.id)];
+      delete state.avatars[key];
+      state.avatarTarget = null;
       // 新增角色会恢复成导入时的原头像；星野会回到 QQ 头像
       await loadAvatars();
-      refreshBotAvatars();
-      applyFavicon();
+      if (isGrp) { renderGroupSide(); renderConvList(); renderContactList(); }
+      else { refreshBotAvatars(); applyFavicon(); }
       toast('已恢复默认头像');
     } catch (e) {
       toast('恢复失败：' + (e?.message || e));
     }
   }
 
+  function openAvatarPicker() {
+    state.avatarTarget = { kind: 'peer', id: state.bot.id };
+    els.avatarFileInput.value = '';
+    els.avatarFileInput.click();
+  }
+
   els.csAvatarPick.addEventListener('click', openAvatarPicker);
   els.csAvatarPreview.addEventListener('click', openAvatarPicker);
   els.csAvatar.addEventListener('click', openAvatarPicker);
   els.csAvatar.title = '点击更换头像';
-  els.csAvatarReset.addEventListener('click', resetAvatar);
+  els.csAvatarReset.addEventListener('click', () => {
+    state.avatarTarget = { kind: 'peer', id: state.bot.id };
+    resetAvatar();
+  });
   els.avatarClose.addEventListener('click', closeAvatarCrop);
   els.avatarCancel.addEventListener('click', closeAvatarCrop);
   els.avatarMask.addEventListener('click', (e) => {
     if (e.target === els.avatarMask) closeAvatarCrop();
   });
-  els.avatarRepick.addEventListener('click', openAvatarPicker);
+  // 「重新选择」只重开文件框，**不要**重置 avatarTarget —— 否则换群头像时点它
+  // 会把目标换回上一个私聊角色，最后存到角色身上去了
+  els.avatarRepick.addEventListener('click', () => {
+    els.avatarFileInput.value = '';
+    els.avatarFileInput.click();
+  });
   els.avatarConfirm.addEventListener('click', confirmAvatarCrop);
   els.avatarFileInput.addEventListener('change', () => {
     const f = els.avatarFileInput.files && els.avatarFileInput.files[0];
@@ -3128,6 +5054,7 @@
 
   // ---------------------------------------------------------- 聊天设置（按对话）
   function openChatSettings() {
+    applyChatSettingsIdentity();   // 打开前再同步一次，绝不显示上一个角色
     ensureChatTheme(state.bot.id);
     state.chatSide = 'in';
     els.chatSettingsMask.classList.remove('hidden');
@@ -3554,7 +5481,10 @@
     if (!b) return;
     const act = b.dataset.act;
     els.mobileActions.classList.add('hidden');
-    if (act === 'chatStyle') openChatSettings();
+    if (act === 'chatStyle') {
+      if (isGroup()) openGroupSet();          // 群里没有按对话的气泡设置
+      else openChatSettings();
+    } else if (act === 'createGroup') openCreateGroup();
     else if (act === 'multiselect') {
       openMobileChat();
       enterSelectMode();
@@ -3586,9 +5516,19 @@
     if (!els.ctxMenu.classList.contains('hidden') && !els.ctxMenu.contains(e.target)) {
       els.ctxMenu.classList.add('hidden');
     }
+    if (els.memberMenu && !els.memberMenu.classList.contains('hidden') &&
+        !els.memberMenu.contains(e.target)) {
+      els.memberMenu.classList.add('hidden');
+    }
     if (!els.moreMenu.classList.contains('hidden') && !els.moreMenu.contains(e.target) &&
         !els.btnMore.contains(e.target)) {
       els.moreMenu.classList.add('hidden');
+    }
+    if (!els.presenceMenu.classList.contains('hidden') &&
+        !els.presenceMenu.contains(e.target) &&
+        !(els.presenceChip && els.presenceChip.contains(e.target)) &&
+        !(els.mobilePresence && els.mobilePresence.contains(e.target))) {
+      els.presenceMenu.classList.add('hidden');
     }
     if (!els.emojiPanel.classList.contains('hidden') &&
         !els.emojiPanel.contains(e.target) && !els.emojiBtn.contains(e.target)) {
@@ -3607,6 +5547,15 @@
     if (e.key === 'Escape') {
       if (!els.lightbox.classList.contains('hidden')) { closeLightbox(); return; }
       if (!els.forwardMask.classList.contains('hidden')) { closeForwardModal(); return; }
+      if (!els.createGroupMask.classList.contains('hidden')) { closeCreateGroup(); return; }
+      if (!els.inviteMask.classList.contains('hidden')) {
+        els.inviteMask.classList.add('hidden'); return;
+      }
+      if (!els.groupSetMask.classList.contains('hidden')) { closeGroupSet(); return; }
+      if (!els.announceMask.classList.contains('hidden')) { closeAnnounce(); return; }
+      if (!els.memberMenu.classList.contains('hidden')) {
+        els.memberMenu.classList.add('hidden'); return;
+      }
       if (!els.categoryMask.classList.contains('hidden')) {
         closeCategoryModal(); return;
       }
@@ -3623,6 +5572,9 @@
         els.contactsPage.classList.add('hidden');
         setMobileTab('messages');
         return;
+      }
+      if (!els.presenceMenu.classList.contains('hidden')) {
+        els.presenceMenu.classList.add('hidden'); return;
       }
       if (!els.ctxMenu.classList.contains('hidden') || !els.moreMenu.classList.contains('hidden')) {
         closeCtx(); return;
@@ -3666,6 +5618,62 @@
   }, 30000);
 
   // ---------------------------------------------------------- 启动
+  // ---- 登录页：背景图 + 「我」的头像 ----
+  // 背景默认用站点里的 23.png；用户点「更换背景」选的图存在本机 localStorage，
+  // 下次打开直接生效（登录页在连接之前就要好看，不能等 WS）。
+  const LS_LOGIN_BG = 'vol.loginBg';
+
+  function applyLoginBg() {
+    if (!els.connectBg) return;
+    let bg = '';
+    try { bg = localStorage.getItem(LS_LOGIN_BG) || ''; } catch (e) { bg = ''; }
+    els.connectBg.style.backgroundImage = bg
+      ? `url("${bg}")` : 'url("./23.png")';
+  }
+
+  function pickLoginBg() {
+    els.connectBgInput.value = '';
+    els.connectBgInput.click();
+  }
+
+  function saveLoginBg(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type || '')) { toast('请选择图片文件'); return; }
+    if (file.size > 12 * 1024 * 1024) { toast('图片太大（上限 12MB）'); return; }
+    const fr = new FileReader();
+    fr.onload = () => {
+      try { localStorage.setItem(LS_LOGIN_BG, String(fr.result)); } catch (e) { /* 满了就忽略 */ }
+      applyLoginBg();
+      toast('登录背景已更换');
+    };
+    fr.onerror = () => toast('读取失败');
+    fr.readAsDataURL(file);
+  }
+
+  if (els.connectBgPick) els.connectBgPick.addEventListener('click', pickLoginBg);
+  if (els.connectBgInput) {
+    els.connectBgInput.addEventListener('change', () => {
+      const f = els.connectBgInput.files && els.connectBgInput.files[0];
+      saveLoginBg(f);
+    });
+  }
+
+  // 登录页也要显示「我」的头像 —— 用 owner 的 QQ 头像 / 自定义头像
+  async function loadLoginIdentity() {
+    try {
+      const res = await apiFetch('/api/identity', { cache: 'no-store' });
+      if (!res.ok) return;
+      const d = await res.json();
+      if (!d || d.ok === false || !d.owner_id) return;
+      state.me.id = Number(d.owner_id);
+      state.me.name = d.owner_nickname || state.me.name;
+      els.meName.textContent = state.me.name;
+      els.mobileName.textContent = state.me.name;
+      fillAvatar(els.brandAvatar, state.me.name, state.me.id, '我');
+      fillAvatar(els.railAvatar, state.me.name, state.me.id, '我');
+    } catch (e) { /* 老服务端没有这个接口 → 保留文字头像 */ }
+  }
+
   function init() {
     const qTheme = new URLSearchParams(location.search).get('theme');
     setTheme(qTheme || localStorage.getItem(LS_THEME) || 'light');
@@ -3678,6 +5686,8 @@
     updateSendBtn();
     els.tokenInput.value = state.token;
     if (state.token) els.tokenRow.classList.remove('hidden');
+    applyLoginBg();
+    loadLoginIdentity();
     connect();
   }
 

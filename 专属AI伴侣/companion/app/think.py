@@ -140,12 +140,15 @@ async def analyze(
     image_is_sticker: bool = False,
     time_text: str = "",
     trait_text: str = "",
+    presence_text: str = "",
 ) -> Dict[str, Any]:
     parts = []
     if time_text:
         parts.append(f"【时间】{time_text}")
     if trait_text:
         parts.append(f"【关系设定】\n{trait_text}")
+    if presence_text:
+        parts.append(presence_text)
     if recent:
         parts.append("最近对话：\n" + "\n".join(recent[-8:]))
     parts.append(f"对方画像：\n{profile_text}")
@@ -331,6 +334,14 @@ SHARE_KIND_HINT = {
             "上一段话已经聊完了 —— 像真人隔了一会儿想起一件事那样随口说出来，"
             "别追问刚才聊过的内容，也别客套地找补（真人重新开口时几乎不用问句）。",
     "share": "你想分享一个跟刚才话题有关的东西或想法，像聊天时突然想起来一样。",
+    # ── 群聊 ──
+    "group": "你们在一个群里，你在群里说一句 —— 可以接别人的话，也可以聊自己的。"
+             "群里不只你一个人，所以**别问对方的私事、别提只有你俩知道的事**；"
+             "1~3 条短句，像在群里随口插一句。不要 @ 任何人，不要提「群」这个字。",
+    "group_share": "你在群里说一件事，内容来自另外一段聊天里的片段。"
+                   "**绝对不要说这是聊天记录、不要提「转发」「截图」「他说」**，"
+                   "就当自己随口提起 —— 可以带点情绪（得意、吃醋、委屈、抱怨）。"
+                   "1~3 条短句，别长篇。",
     # ── 收尾（对方说晚安/去忙/下线）──
     "closing": "对方在收尾这次对话。你也自然收尾：一两句话就够，可以带点情绪，"
                "但**不要追问、不要留话头、不要抛新话题**，让对方安心走。",
@@ -572,6 +583,9 @@ async def express(
     self_facts_text: str = "",
     time_text: str = "",
     trait_text: str = "",
+    presence_text: str = "",
+    group_text: str = "",
+    schedule_text: str = "",
 ) -> Union[str, List[str]]:
     """写回复。
 
@@ -585,6 +599,7 @@ async def express(
             "【世界观】\n" + world.strip() if world.strip() else "",
             "【边界】\n" + boundaries.strip() if boundaries.strip() else "",
             "【关系设定】\n" + trait_text.strip() if trait_text.strip() else "",
+            presence_text.strip() if presence_text.strip() else "",
             "【内部状态】\n" + state_text,
             # ★ 画像必须进表达通道。之前只传给了分析通道，
             # 结果它写回复时**看不到对方是谁、在做什么、在意什么** ——
@@ -603,6 +618,10 @@ async def express(
     blocks: List[str] = []
     if time_text:
         blocks.append(f"【时间】\n{time_text}")
+    if schedule_text:
+        # 角色自己的作息（几点睡、几点起）。它是**先于话题**的一层：
+        # 凌晨三点的人不该精神抖擞地聊游戏，刚起的人说话会慢半拍。
+        blocks.append(schedule_text)
     if analysis:
         blocks.append(
             "【这一轮的分析结论（只给你参考，不要照抄）】\n"
@@ -638,7 +657,14 @@ async def express(
             "【上一段对话的收尾】\n" + resume_hint +
             "\n（对方现在回来了。自然就接上，别刻意复述，也别表现成「好久不见的惊讶」。）"
         )
-    if proactive:
+    # ★ 群聊场景优先：给了 group_text 就不再走「一对一主动开口」那套场景。
+    #   之前群发言套用私聊的 proactive 场景（「你主动开口找对方」），模型就会
+    #   把它当成一对一私聊来讲 —— 啰嗦、只对着老师说话、没有「当众说」的自觉。
+    if group_text:
+        blocks.append(group_text)
+        if extra_hint:
+            blocks.append("【可以考虑提到的内容】\n" + extra_hint)
+    elif proactive:
         blocks.append(
             "【场景】现在是你主动开口找对方，不是回复。"
             "说点你真的想到的事，别用「在吗」「忙什么呢」这种开场。"

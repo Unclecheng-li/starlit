@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import random
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .channel.napcat import NapCatChannel
 from .config import BehaviorConfig
@@ -156,6 +156,7 @@ class Sender:
         delay_scale: float = 1.0,
         sender_id: str = "",
         sender_name: str = "",
+        card: Optional[Dict[str, Any]] = None,
     ) -> int:
         """发送整段文字（本地按句拆条）。返回实际发出的**文字条数**。
 
@@ -205,6 +206,12 @@ class Sender:
                         break
                     await self._gap("sticker", delay_scale)
                     await self._send_sticker(f, **target)
+
+            if card:
+                # 卡片另起一条（真人的「甩分享」也是单独一条），排在最后
+                if not (abort_check and abort_check()):
+                    await self._gap("bubble", delay_scale)
+                    await self._send_card(card, **target)
         return sent
 
     async def reply_bubbles(
@@ -220,6 +227,9 @@ class Sender:
         delay_scale: float = 1.0,
         sender_id: str = "",
         sender_name: str = "",
+        reply_to_mid: str = "",
+        card: Optional[Dict[str, Any]] = None,
+        mid_base: str = "",
     ) -> int:
         """直接按模型给定的气泡列表逐条发送（不做本地拆句）。
 
@@ -238,6 +248,9 @@ class Sender:
         if sender_id or sender_name:
             target["sender_id"] = sender_id
             target["sender_name"] = sender_name
+        if reply_to_mid:
+            # 引用回复：让通道把被引用的那条一并带进事件（真 QQ 则拼 reply 段）
+            target["reply_to_mid"] = reply_to_mid
         sent = 0
         async with self._lock_for(user_id, group_id, sender_id):
             if sticker_files and sticker_first:
@@ -260,7 +273,15 @@ class Sender:
                         await self._delay(delay_scale)
                 else:
                     await asyncio.sleep(self._bubble_gap(b, delay_scale))
-                await self.channel.send_text(b, **target)
+                # ★ 群里带上**库内 mid**（g<id>）：第一条就是这条消息的 mid，
+                #   第 2、3 条气泡是 g<id>-2 / g<id>-3。这样客户端收到的实时
+                #   message_id 和刷新后历史里的完全一致 —— 引用回复才能按 mid
+                #   查到那条消息（以前实时是随机序号，引用整个失效）。
+                kw = dict(target)
+                if mid_base:
+                    kw["message_id"] = (str(mid_base) if i == 0
+                                        else f"{mid_base}-{i + 1}")
+                await self.channel.send_text(b, **kw)
                 sent += 1
             if sticker_files and not sticker_first:
                 for f in sticker_files:
@@ -268,7 +289,23 @@ class Sender:
                         break
                     await self._gap("sticker", delay_scale)
                     await self._send_sticker(f, **target)
+            if card:
+                # 卡片单独一条（真人的「甩分享」也是另起一条），排在后面
+                if not (abort_check and abort_check()):
+                    await self._gap("bubble", delay_scale)
+                    await self._send_card(card, **target)
         return sent
+
+    async def _send_card(self, card: Dict[str, Any], *, user_id: str = "",
+                         group_id: str = "", sender_id: str = "",
+                         sender_name: str = "") -> None:
+        """发一条结构化卡片（OneBot 的 `json` 段，前端渲染成可点卡片）。"""
+        try:
+            await self.channel.send_segments(
+                [card], user_id=user_id, group_id=group_id,
+                sender_id=sender_id, sender_name=sender_name)
+        except Exception as e:  # noqa: BLE001
+            print(f"[act] 发卡片失败：{e!r}")
 
     async def _send_sticker(self, file: str, *, user_id: str = "", group_id: str = "",
                             sender_id: str = "", sender_name: str = "") -> None:

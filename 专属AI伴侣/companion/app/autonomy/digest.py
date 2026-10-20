@@ -21,6 +21,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from ..config import AutonomyConfig, MemoryConfig
 from ..llm import LLM
@@ -67,6 +68,39 @@ class ShareItem:
     # 终审给的「值得聊的点」—— 给表达通道用，让分享像真人随口聊，
     # 而不是把搜索摘要原文甩出去
     angle: str = field(default="")
+    # 卡片用：真人的「甩分享」是一张卡片（标题 + 摘要 + 来源），
+    # 不是把正文念一遍。这两个字段专供 share_card()。
+    title: str = field(default="")
+    desc: str = field(default="")
+
+
+def share_card(item: "ShareItem") -> Dict[str, Any]:
+    """把一条分享变成 OneBot 的 `json` 段（QQ 同构的结构化卡片）。
+
+    前端按 `meta.news` 渲染成可点的卡片；不做卡片时退回纯文本气泡，
+    所以渲染失败也不会丢内容。
+    """
+    title = (item.title or item.text or "").strip()[:60]
+    desc = (item.desc or item.text or "").strip()[:120]
+    if not title or not item.url:
+        return {}
+    try:
+        host = urlsplit(item.url).netloc
+    except ValueError:
+        host = ""
+    inner = {
+        "app": "com.tencent.structmsg",
+        "view": "news",
+        "meta": {"news": {
+            "title": title,
+            "desc": desc,
+            "jumpUrl": item.url,
+            "tag": host or "分享",
+            "preview": "",
+        }},
+    }
+    return {"type": "json",
+            "data": {"data": json.dumps(inner, ensure_ascii=False)}}
 
 
 class Digest:
@@ -117,7 +151,9 @@ class Digest:
                              url=str(pending.get("url") or ""),
                              score=float(pending.get("score") or 0.0),
                              topic=str(pending.get("topic") or ""),
-                             angle=str(pending.get("angle") or ""))
+                             angle=str(pending.get("angle") or ""),
+                             title=str(pending.get("title") or ""),
+                             desc=str(pending.get("desc") or ""))
 
         if self._today_shared() >= self._daily_max:
             print(f"[digest] 今日分享已达上限 {self._daily_max} 次，只静默学习")
@@ -169,7 +205,8 @@ class Digest:
                 if score >= self._threshold:
                     candidates.append(ShareItem(
                         text=f"{r.title}。{r.snippet[:160]}",
-                        url=r.url, score=score, topic=topic))
+                        url=r.url, score=score, topic=topic,
+                        title=r.title, desc=r.snippet[:160]))
 
         if not candidates:
             print(f"[digest] 初筛后没有候选（阈值 {self._threshold}），静默入库完毕")
@@ -194,6 +231,7 @@ class Digest:
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "score": best.score, "topic": best.topic, "angle": best.angle,
                 "text": best.text[:400], "url": best.url,
+                "title": best.title[:120], "desc": best.desc[:200],
             })
         print(f"[digest] ✅ 产出可分享项（终审分 {best.score:.1f}，"
               f"话题「{best.topic}」）：{best.text[:50]}…")

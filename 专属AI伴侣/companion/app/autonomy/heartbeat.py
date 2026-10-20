@@ -25,7 +25,7 @@ from ..state import StateMachine
 from ..store import Store
 from ..think import (decide_initiative, express, format_recent,
                      format_time_context)
-from .digest import Digest, ShareItem
+from .digest import Digest, ShareItem, share_card
 from .suppress import Decision, Suppressor
 
 
@@ -137,6 +137,8 @@ class Heartbeat:
         sender_name: str = "",
         trait_text: str = "",
         delay_scale: float = 1.0,
+        presence_text: str = "",
+        schedule=None,
     ):
         self.cfg = cfg
         self.qq = qq
@@ -152,6 +154,10 @@ class Heartbeat:
         self.sender_name = sender_name
         self.trait_text = trait_text
         self.delay_scale = delay_scale
+        self.presence_text = presence_text
+        # ★ 角色自己的作息：睡着时**不主动开口**（但对方来找她，她照样回）。
+        #   以前所有角色共用一份全局 quiet_hours，于是「一到点大家集体睡」。
+        self.schedule = schedule
         self._stop = asyncio.Event()
         self._replan = asyncio.Event()
         self.rhythm = ProactiveRhythm(cfg)
@@ -223,6 +229,18 @@ class Heartbeat:
                     self.state.emotion, self.state.relationship
                 )
 
+            # ★ 角色自己的作息：睡着的人不该被抽中主动开口。
+            #   把排期直接推到「她起床之后 + 一点点」—— 而不是每一分钟醒一次
+            #   然后被挡掉（那只会刷日志、还容易抽到「远」档睡过头）。
+            if self.schedule is not None:
+                left = self.schedule.minutes_until_wake()
+                if left > 0:
+                    pushed = left + random.uniform(1.0, 12.0)
+                    if pushed > minutes:
+                        print(f"[heartbeat] {self.sender_name or '她'} 正在睡"
+                              f"（还有 {left:.0f} 分钟到起床点），排期顺延到起床后")
+                        minutes = pushed
+
             # 把「下次大概什么时候」存下来，方便随时查（inspect / /next）
             self.store.counter_set("next_proactive_at", time.time() + minutes * 60)
 
@@ -288,7 +306,10 @@ class Heartbeat:
         # 推进状态：静默时段算休息，电量恢复
         resting = self.suppressor.in_quiet_hours()
         gap_h = (time.time() - self.last_reply_ts) / 3600.0 if self.last_reply_ts else None
-        self.state.tick(last_interaction_ago_h=gap_h, resting=resting)
+        # ★ 把「我发出去的消息多久没人回」交给情绪状态机 —— 等得越久，
+        #   越担心/沮丧/难过、越藏不住想被回应的需求感（describe 会写出来）。
+        self.state.tick(last_interaction_ago_h=gap_h, resting=resting,
+                        unanswered_h=self.state.waiting_hours())
 
         # 顺带跑一次自主浏览（内部自带频率限制）
         share: Optional[ShareItem] = None
@@ -352,10 +373,13 @@ class Heartbeat:
             extra_hint=content_hint, proactive=True,
             share_kind=share_kind, world=world,
             time_text=time_text,
+            schedule_text=(self.schedule.scene_text()
+                           if self.schedule is not None else ""),
             profile_text=self.memory.profile_text(),   # 主动开口也要问对方的事
             arousal=self.state.emotion.arousal,
             valence=self.state.emotion.valence,
             trait_text=self.trait_text,
+            presence_text=self.presence_text,
         )
         if not draft or "[NO_MESSAGE]" in draft:
             return Decision(False, "有话可说", "模型判断没什么想说的", kind=share_kind)
@@ -371,6 +395,14 @@ class Heartbeat:
         if self.sender_id or self.sender_name:
             send_kwargs["sender_id"] = self.sender_id
             send_kwargs["sender_name"] = self.sender_name
+        # ★ 搜到的内容用真人的「甩分享」发出去（一张卡片），而不是把搜索
+        #   摘要原文当正文念一遍。实测真人重启话题的第一手段就是甩分享
+        #   （占 38%，问句只占 2%）。卡片是**附在文字气泡之后**的一条，
+        #   文字仍然写进 transcript，所以重开窗口也看得到聊了什么。
+        if share:
+            card = share_card(share)
+            if card:
+                send_kwargs["card"] = card
         await self.sender.reply(draft, **send_kwargs)
         self.store.counter_set("last_spoke_ts", time.time())
         self._bump_today()

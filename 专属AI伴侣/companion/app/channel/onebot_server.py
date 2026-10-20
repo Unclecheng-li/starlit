@@ -47,6 +47,7 @@ import random
 import re
 import shutil
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -88,6 +89,9 @@ class OneBotServerChannel:
         character_creator=None,
         traits_get=None,
         traits_set=None,
+        presence_get=None,
+        presence_set=None,
+        group_api=None,
     ):
         self.cfg = cfg                 # QQConfig（self_id=星野号 owner_id=用户号）
         self.scfg = cfg.server         # QQServerConfig
@@ -102,6 +106,11 @@ class OneBotServerChannel:
         self.character_creator = character_creator
         self.traits_get = traits_get
         self.traits_set = traits_set
+        self.presence_get = presence_get
+        self.presence_set = presence_set
+        # 群聊接口（由 Companion 提供）：list/detail/create/kick/announce/
+        # mute_all/rename/requests/... —— 见 Companion 里的「对外的群接口」
+        self.group_api = group_api
         self.sticker_lib = sticker_lib  # 可选：让新上传/删除立刻对 vol 生效
         self.sticker_dir = Path(sticker_dir).resolve() if sticker_dir else None
         # 表情包缩略图缓存（列表用静态首帧，hover 才加载原图/动图）
@@ -187,6 +196,19 @@ class OneBotServerChannel:
         # 每个角色的「热情 / 好感」
         app.router.add_get("/api/character-traits", self._api_traits_get)
         app.router.add_post("/api/character-traits", self._api_traits_post)
+        app.router.add_get("/api/presence", self._api_presence_get)
+        app.router.add_post("/api/presence", self._api_presence_post)
+        # 群聊：建群 / 群详情（含成员与公告）/ 审批 / 管理
+        app.router.add_get("/api/identity", self._api_identity)
+        app.router.add_get("/api/groups", self._api_groups_list)
+        app.router.add_get("/api/groups/detail", self._api_groups_detail)
+        app.router.add_get("/api/groups/history", self._api_groups_history)
+        app.router.add_post("/api/groups/create", self._api_groups_create)
+        app.router.add_post("/api/groups/manage", self._api_groups_manage)
+        app.router.add_get("/api/groups/files", self._api_groups_files)
+        app.router.add_post("/api/groups/upload", self._api_groups_upload)
+        app.router.add_post("/api/groups/files/delete", self._api_groups_file_del)
+        app.router.add_get("/api/groups/file", self._api_groups_file_get)
         # 旧版 Stapxs 页面备用入口（必须先于根路径的静态兜底注册）
         if self.legacy_dir:
             app.router.add_get("/stapxs", self._legacy_root)
@@ -401,6 +423,24 @@ class OneBotServerChannel:
             "get_friends_with_category": self.api_get_friends_with_category,
             "get_friend_list_ex": self.api_get_friends_with_category,
             "get_group_list": self.api_get_group_list,
+            "get_group_info": self.api_get_group_info,
+            "get_group_info_ex": self.api_get_group_info,
+            "get_group_member_list": self.api_get_group_member_list,
+            "get_group_member_info": self.api_get_stranger_info,
+            "get_group_system_msg": self.api_get_group_system_msg,
+            "set_group_add_request": self.api_set_group_add_request,
+            "set_group_kick": self.api_set_group_kick,
+            "set_group_admin": self.api_set_group_admin,
+            "set_group_name": self.api_set_group_name,
+            "set_group_card": self.api_set_group_card,
+            "set_group_special_title": self.api_set_group_special_title,
+            "set_group_whole_ban": self.api_set_group_whole_ban,
+            "_set_group_whole_ban": self.api_set_group_whole_ban,
+            "set_group_ban": self.api_set_group_card,      # 单成员禁言：占位不报错
+            "_send_group_notice": self.api_send_group_notice,
+            "_set_group_notice": self.api_send_group_notice,
+            "set_group_portrait": self.api_set_group_portrait,
+            "upload_group_file": self.api_upload_group_file,
             "get_stranger_info": self.api_get_stranger_info,
             "send_msg": self.api_send_msg,
             "send_private_msg": self.api_send_msg,
@@ -426,7 +466,7 @@ class OneBotServerChannel:
             "can_send_record": self.api_can_send,
             "get_online_clients": self.api_null,
             "getEssenceMsgList": self.api_null,
-            "_get_group_notice": self.api_null,
+            "_get_group_notice": self.api_get_group_notice,
             "get_group_root_files": self.api_null,
         }
 
@@ -503,8 +543,23 @@ class OneBotServerChannel:
             "sex": "unknown",
         }
 
-    async def api_get_group_list(self, _p: Dict[str, Any]) -> List[Any]:
-        return []
+    async def api_get_group_list(self, _p: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self.group_api:
+            return []
+        try:
+            groups = self.group_api.groups_payload()
+        except Exception as e:  # noqa: BLE001
+            print(f"[onebot-server] 取群列表失败：{e!r}")
+            return []
+        return [{
+            "group_id": int(g["group_id"]) if str(g["group_id"]).isdigit() else 0,
+            "group_name": str(g.get("group_name") or "群聊"),
+            "member_count": int(g.get("member_count") or 0),
+            "max_member_count": 200,
+            "group_create_time": 0,
+            "group_level": 1,
+            "group_memo": str(g.get("announce") or ""),
+        } for g in groups]
 
     async def api_get_stranger_info(self, p: Dict[str, Any]) -> Dict[str, Any]:
         cid = str(p.get("user_id") or "")
@@ -537,11 +592,7 @@ class OneBotServerChannel:
         target_id = str(params.get("user_id") or "")
         group_id = str(params.get("group_id") or "")
         if group_id:
-            # vol 当前不支持群聊会话（Stapxs 群列表也是空的）；
-            # 真出现说明客户端行为超预期，记下来但不进主管线。
-            print(f"[onebot-server] 收到群消息（group_id={group_id}），"
-                  "vol 不支持群会话，忽略")
-            return {"message_id": str(next(self._msg_ids))}
+            return await self._send_group_msg(group_id, message)
 
         # 消息段归一：Stapxs 偶尔发 subType（驼峰）—— 统一成 sub_type，
         # 这样主管线的 _is_sticker_only 判定（认 sub_type=="1"）才能命中
@@ -591,11 +642,78 @@ class OneBotServerChannel:
     async def api_send_group_msg(self, params: Dict[str, Any]) -> Dict[str, Any]:
         return await self.api_send_msg(params)
 
+    @staticmethod
+    def _reply_id_of(segments: Any) -> str:
+        """从消息段里取「引用回复」的目标 mid（没有就返回空串）。"""
+        if not isinstance(segments, list):
+            return ""
+        for seg in segments:
+            if not isinstance(seg, dict) or seg.get("type") != "reply":
+                continue
+            data = seg.get("data") or {}
+            rid = str(data.get("id") or data.get("message_id") or "").strip()
+            if rid:
+                return rid
+        return ""
+
+    def _has_group(self, gid: str) -> bool:
+        api = self.group_api
+        try:
+            return bool(api and api.groups.exists(str(gid)))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _send_group_msg(self, group_id: str, message: Any) -> Dict[str, Any]:
+        """我在群里发消息 → 落库（由群引擎做）+ 广播 + 进群引擎。
+
+        ★ 我发的消息**先落库、再判禁言**：全员禁言时群友也「看得到」，
+        只是不回 —— 这是用户明确要的语义，落库动作在引擎里完成。
+        """
+        gid = str(group_id or "")
+        if not self._has_group(gid):
+            print(f"[onebot-server] 收到未知群消息（group_id={gid}），忽略")
+            return {"message_id": str(next(self._msg_ids))}
+        segments = self._normalize_segments(message)
+        text, images, mentioned, img_ids, img_sizes, fwd_ids = parse_message(
+            segments, self.cfg.owner_id)
+        img_ids = [i for i in img_ids if not str(i).startswith("base64://")]
+        mid = str(next(self._msg_ids))
+        raw = {"message_type": "group", "time": int(time.time()),
+               "user_id": int(self.cfg.owner_id or 0),
+               "group_id": int(gid) if gid.isdigit() else gid,
+               "message": segments,
+               # 「引用回复」：段里的 reply.data.id 就是被引用消息的 mid，
+               # 群引擎据此把 reply_to 落到库里，历史和实时都能渲染引用块
+               "_reply_id": self._reply_id_of(segments)}
+        msg = IncomingMessage(
+            kind="group",
+            user_id=str(self.cfg.owner_id or ""),
+            group_id=gid,
+            peer_id=gid,                 # 群会话的「对方」就是群
+            message_id=mid,
+            nickname=self.scfg.owner_nickname,
+            text=text,
+            images=images,
+            raw_image_ids=img_ids,
+            raw_image_sizes=img_sizes,
+            forward_ids=fwd_ids,
+            mentions_self=mentioned,
+            raw=raw,
+        )
+        asyncio.create_task(self._push_user_message(mid, segments, text, "",
+                                                   group_id=gid))
+        asyncio.create_task(self._safe_handle(msg))
+        return {"message_id": mid}
+
     async def _safe_handle(self, msg: IncomingMessage) -> None:
         try:
             await self.on_message(msg)
         except Exception as e:  # noqa: BLE001
+            # ★ 一定要带堆栈：这里以前只 print 一行 repr，于是「我在群里说话
+            #   没人理」的真实原因（pick 里 limit 是 float 导致的切片异常）
+            #   在日志里完全看不出是哪一行，白白排查了一轮。
             print(f"[onebot-server] 主管线处理出错：{e!r}")
+            traceback.print_exc()
 
     @staticmethod
     def _normalize_segments(message: Any) -> Any:
@@ -633,18 +751,24 @@ class OneBotServerChannel:
         """统一出口：没有客户端时进离线队列；有客户端时广播并留一份给新设备。"""
         if not self._clients:
             self._offline_queue.append(event)
-            del self._offline_queue[:-50]        # 只留最近 50 条
+            del self._offline_queue[:-200]       # 私聊与群共用，留 200 条
             return
         self._recent_events.append(event)
         cutoff = time.time() - 1800           # 只补最近 30 分钟
         self._recent_events = [e for e in self._recent_events
                                if float(e.get("time") or 0) >= cutoff]
-        del self._recent_events[:-200]
+        # 私聊与群共用；活跃群会把私聊事件挤掉，所以留 600 条而不是 200
+        del self._recent_events[:-600]
         await self._broadcast(event)
 
     async def _push_user_message(self, mid: str, segments: Any, text: str,
-                                 peer_id: str = "") -> None:
-        """用户消息上屏：message_sent 事件（sender=用户，user_id=会话对象）。
+                                 peer_id: str = "",
+                                 group_id: str = "") -> None:
+        """用户消息上屏：message_sent 事件（sender=用户）。
+
+        私聊：user_id = 会话对象（＝对方是谁）；群里：user_id 仍是**发送者**
+        （＝我自己），会话身份靠 group_id 表达 —— 两种模式语义不同，
+        客户端按 message_type 分流。
 
         Stapxs 收到后：发送端用它替换 fake_msg 占位；其他设备作为
         「自己发的消息」追加（右侧气泡）—— 这就是多端同步。
@@ -653,62 +777,160 @@ class OneBotServerChannel:
             peer_int = int(peer_id or self.cfg.self_id or 0)
         except ValueError:
             peer_int = 0
+        gid = str(group_id or "")
+        owner_int = int(self.cfg.owner_id or 0)
         event = {
             "time": int(time.time()),
-            "self_id": int(self.cfg.owner_id or 0),
+            "self_id": owner_int,
             "post_type": "message_sent",
-            "message_type": "private",
-            "sub_type": "friend",
+            "message_type": "group" if gid else "private",
+            "sub_type": "normal" if gid else "friend",
             "message_id": mid,
-            "user_id": peer_int,                     # 会话对方 = 当前角色
-            "sender": {"user_id": int(self.cfg.owner_id or 0),
+            "user_id": owner_int if gid else peer_int,
+            "sender": {"user_id": owner_int,
                        "nickname": self.scfg.owner_nickname},
             "message": segments if isinstance(segments, list) else [],
             "raw_message": text,
         }
+        if gid:
+            event["group_id"] = int(gid) if gid.isdigit() else gid
+            event["sender"].update(self._group_member_meta(gid, owner_int))
+            q = self._quoted_of(gid, segments)
+            if q:
+                event["reply"] = q
         self._live_msgs[mid] = {
             "role": "user", "peer_id": str(peer_int),
             "ts": float(event["time"]), "text": text,
+            "group_id": gid,
         }
         self._trim_live_msgs()
         await self._emit_event(event)
+
+    def _group_member_meta(self, gid: str, uid: Any) -> Dict[str, Any]:
+        """群消息的发送者徽章：群名片 / 角色（群主·管理）/ 头衔 / 等级。
+
+        ★ 实时推送的 sender 以前只有 user_id + nickname —— 客户端画不出来
+        「群主 / LV5」这些徽章（只能兜底成 LV1），而右侧成员列表是按真实
+        等级算的。于是同一个人在聊天气泡上是 LV1、在成员列表里是 LV2
+        （用户实测「群聊里的用户等级和右侧列表对不上」）。这里补齐。
+        """
+        out: Dict[str, Any] = {"card": "", "role": "member", "title": "",
+                               "level": 1}
+        api = self.group_api
+        if not api or not gid:
+            return out
+        try:
+            detail = api.group_detail(gid)
+        except Exception:  # noqa: BLE001
+            return out
+        for m in detail.get("members") or []:
+            if str(m.get("user_id")) == str(uid):
+                out["card"] = str(m.get("nickname") or "")
+                out["role"] = str(m.get("role") or "member")
+                out["title"] = str(m.get("title") or "")
+                try:
+                    out["level"] = int(m.get("level") or 1)
+                except (TypeError, ValueError):
+                    out["level"] = 1
+                break
+        return out
+
+    def _quoted_of(self, gid: str, segments: Any) -> Optional[Dict[str, Any]]:
+        """把我「引用回复」的那条消息一并带进事件，别的端也能画出引用块。"""
+        return self._quoted_by_mid(gid, self._reply_id_of(segments))
+
+    @staticmethod
+    def _base_mid(mid: str) -> str:
+        """把「第 N 条气泡」的 mid 还原成那条消息的库内 mid。
+
+        一条 gmsg 可能被拆成多条气泡推送，mid 形如 `g119` / `g119-2` / `g119-3`
+        （和私聊历史的 `h<id>-2` 同一套写法）。引用第 2、3 条气泡时，
+        要按 `g119` 去查库才找得到。
+        """
+        rid = str(mid or "").strip()
+        if "-" in rid:
+            head, _, tail = rid.rpartition("-")
+            if head and tail.isdigit():
+                return head
+        return rid
+
+    def _quoted_by_mid(self, gid: str, mid: str) -> Optional[Dict[str, Any]]:
+        """按 mid 取出被引用消息的「昵称 + 摘要」（历史和实时都用它）。"""
+        rid = self._base_mid(mid)
+        if not rid:
+            return None
+        api = self.group_api
+        if not api or not self._has_group(str(gid or "")):
+            return None
+        try:
+            src = api.group_store_for(gid).find_gmsg(rid)
+        except Exception:  # noqa: BLE001
+            src = None
+        if not src:
+            return None
+        kind = str(src.get("kind") or "")
+        if kind == "user":
+            name = self.scfg.owner_nickname
+        elif kind == "system":
+            name = "系统"
+        else:
+            name = str(src.get("sender_name") or "成员")
+        return {"message_id": str(src.get("mid") or rid), "name": name,
+                "text": str(src.get("text") or "")[:80].replace("\n", " ")}
 
     # ---------------- vol → 客户端（Sender 调用的接口） ----------------
 
     async def send_text(self, text: str, *, user_id: str = "",
                         group_id: str = "", sender_id: str = "",
-                        sender_name: str = "") -> Dict[str, Any]:
+                        sender_name: str = "", reply_to_mid: str = "",
+                        message_id: str = "") -> Dict[str, Any]:
         await self._push_bot_message(
             [{"type": "text", "data": {"text": text}}], text,
-            sender_id=sender_id, sender_name=sender_name)
+            sender_id=sender_id, sender_name=sender_name, group_id=group_id,
+            reply_to_mid=reply_to_mid, message_id=message_id)
         return {"status": "ok", "retcode": 0, "data": None}
 
     async def send_sticker(self, file: str, *, user_id: str = "",
                            group_id: str = "",
                            summary: str = "[表情包]",
                            sender_id: str = "",
-                           sender_name: str = "") -> Dict[str, Any]:
+                           sender_name: str = "",
+                           reply_to_mid: str = "",
+                           message_id: str = "") -> Dict[str, Any]:
         """file 是 file_uri() 生成的 HTTP URL（客户端 <img> 直接加载）。"""
         await self._push_bot_message(
             [{"type": "image",
               "data": {"file": file, "summary": summary, "sub_type": 1}}],
-            summary, sender_id=sender_id, sender_name=sender_name)
+            summary, sender_id=sender_id, sender_name=sender_name,
+            group_id=group_id, reply_to_mid=reply_to_mid,
+            message_id=message_id)
         return {"status": "ok", "retcode": 0, "data": None}
 
     async def send_segments(self, segments: List[Dict[str, Any]], *,
                             user_id: str = "", group_id: str = "",
                             sender_id: str = "",
-                            sender_name: str = "") -> Dict[str, Any]:
+                            sender_name: str = "",
+                            reply_to_mid: str = "",
+                            message_id: str = "") -> Dict[str, Any]:
         raw = "".join(str((s.get("data") or {}).get("text") or "")
                       for s in segments if s.get("type") == "text")
         await self._push_bot_message(
-            segments, raw, sender_id=sender_id, sender_name=sender_name)
+            segments, raw, sender_id=sender_id, sender_name=sender_name,
+            group_id=group_id, reply_to_mid=reply_to_mid,
+            message_id=message_id)
         return {"status": "ok", "retcode": 0, "data": None}
 
     async def _push_bot_message(self, segments: List[Dict[str, Any]],
                                 raw_text: str, *, sender_id: str = "",
-                                sender_name: str = "") -> None:
+                                sender_name: str = "",
+                                group_id: str = "",
+                                reply_to_mid: str = "",
+                                message_id: str = "") -> None:
         """角色的消息：message 事件（sender=该角色）→ 客户端左侧气泡。
+
+        私聊时 user_id = 发送者（会话对方就是它）；群里则是
+        message_type=group + group_id，**user_id 仍然是发送者**
+        —— 客户端靠这个区分「谁在群里说话」，别按私聊的语义去理解。
 
         没有客户端在线时入离线队列（连接建立时重放），
         有客户端在线时直接广播。"""
@@ -717,27 +939,43 @@ class OneBotServerChannel:
         except ValueError:
             sid = 0
         name = (sender_name or self.scfg.bot_nickname).strip() or "星野"
-        mid = str(next(self._msg_ids))
+        # ★ 群里用**群库里的 mid**（g<id>）当 message_id，而不是随机序号 ——
+        #   否则「实时收到的那条」和「刷新后历史里的那条」是两套 id，
+        #   客户端引用实时消息时后端按 mid 查库查不到 → 引用回复整个失效
+        #   （实测：我引用提出的消息，落库 reply_to=0、气泡也没有引用块）。
+        mid = str(message_id or next(self._msg_ids))
+        gid = str(group_id or "")
         event = {
             "time": int(time.time()),
             "self_id": int(self.cfg.owner_id or 0),
             "post_type": "message",
-            "message_type": "private",
-            "sub_type": "friend",
+            "message_type": "group" if gid else "private",
+            "sub_type": "normal" if gid else "friend",
             "message_id": mid,
             "user_id": sid,                         # 发送者 = 当前角色
             "sender": {"user_id": sid, "nickname": name},
             "message": segments,
             "raw_message": raw_text,
         }
+        if gid:
+            event["group_id"] = int(gid) if gid.isdigit() else gid
+            event["sender"].update(self._group_member_meta(gid, sid))
+            # ★ 角色引用我的某条消息时，把它一并写进事件 —— 否则客户端只有
+            #   重新打开群、走历史接口才能画出引用块（实时的那条没有引用）
+            q = self._quoted_by_mid(gid, reply_to_mid)
+            if q:
+                event["reply"] = q
         self._live_msgs[mid] = {
             "role": "assistant", "peer_id": str(sid),
             "ts": float(event["time"]), "text": raw_text,
+            "group_id": gid,
         }
         self._trim_live_msgs()
         if not self._clients:
             self._offline_queue.append(event)
-            del self._offline_queue[:-50]        # 只留最近 50 条
+            # ★ 私聊和群聊共用这一条队列；一个活跃的群很容易把私聊消息挤掉
+            #   （原来是 50 条），所以放宽到 200 条再丢最旧的。
+            del self._offline_queue[:-200]
             print(f"[onebot-server] 无客户端在线，消息入离线队列"
                   f"（{len(self._offline_queue)} 条待重放）：{raw_text[:30]}")
             return
@@ -751,6 +989,37 @@ class OneBotServerChannel:
         for mid, info in list(self._live_msgs.items()):
             if float(info.get("ts") or 0) < cutoff:
                 self._live_msgs.pop(mid, None)
+
+    async def push_group_system(self, group_id: str, text: str) -> None:
+        """群里的系统消息（建群 / 改名 / 入群 / 踢人 / 公告…）。
+
+        不是谁说的，所以 user_id=0、sender.role=system —— 客户端把它渲染成
+        居中的提示条（像 QQ 群里的灰字），而不是某个人的气泡。
+        """
+        gid = str(group_id or "")
+        if not gid or not str(text or "").strip():
+            return
+        body = str(text)
+        mid = str(next(self._msg_ids))
+        event = {
+            "time": int(time.time()),
+            "self_id": int(self.cfg.owner_id or 0),
+            "post_type": "message",
+            "message_type": "group",
+            "sub_type": "normal",
+            "message_id": mid,
+            "user_id": 0,
+            "sender": {"user_id": 0, "nickname": "系统", "card": "系统",
+                       "role": "system", "level": 0, "title": ""},
+            "message": [{"type": "text", "data": {"text": body}}],
+            "raw_message": body,
+            "group_id": int(gid) if gid.isdigit() else gid,
+        }
+        self._live_msgs[mid] = {"role": "system", "peer_id": gid,
+                                "ts": float(event["time"]), "text": body,
+                                "group_id": gid}
+        self._trim_live_msgs()
+        await self._emit_event(event)
 
     def file_uri(self, path: str | Path) -> str:
         """本地文件 → 客户端可加载的 HTTP URL（表情包下载走静态路由）。
@@ -961,9 +1230,229 @@ class OneBotServerChannel:
                 })
         return {"messages": messages, "result": None, "echo": None}
 
-    async def api_get_group_msg_history(self, _p: Dict[str, Any]) -> Dict[str, Any]:
-        """群历史。本模式没有群，恒空（Stapxs 群列表也是空的）。"""
-        return {"messages": []}
+    async def api_get_group_msg_history(
+            self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """群历史回放。一条 gmsg 就是一条消息（不再像私聊那样按 \\n 拆）。"""
+        try:
+            count = int(params.get("count") or 40)
+        except (TypeError, ValueError):
+            count = 40
+        count = max(1, min(count, 200))
+        gid = str(params.get("group_id") or "")
+        api = self.group_api
+        if not api or not self._has_group(gid):
+            return {"messages": []}
+        try:
+            rows = [r for r in api.group_messages(gid, count)
+                    if not int(r.get("revoked") or 0)]
+            levels = {str(m["user_id"]): int(m.get("level") or 1)
+                      for m in api.group_detail(gid).get("members", [])}
+        except Exception as e:  # noqa: BLE001
+            print(f"[onebot-server] 取群历史失败：{e!r}")
+            return {"messages": []}
+        # 引用回复：把被引用的那条消息也带出来（昵称 + 摘要），客户端才能画引用块
+        quoted: Dict[int, Dict[str, Any]] = {}
+        store = None
+        try:
+            store = api.group_store_for(gid) if hasattr(api, "group_store_for") else None
+        except Exception:  # noqa: BLE001
+            store = None
+        for r in rows:
+            rid = int(r.get("reply_to") or 0)
+            if not rid or rid in quoted:
+                continue
+            src = next((x for x in rows if int(x.get("id") or 0) == rid), None)
+            if src is None and store is not None:
+                try:
+                    src = store.get_gmsg(rid)
+                except Exception:  # noqa: BLE001
+                    src = None
+            if not src:
+                continue
+            qkind = str(src.get("kind") or "")
+            if qkind == "user":
+                qname = self.scfg.owner_nickname
+            elif qkind == "system":
+                qname = "系统"
+            else:
+                qname = str(src.get("sender_name") or "成员")
+            quoted[rid] = {
+                "message_id": str(src.get("mid") or f"g{rid}"),
+                "name": qname,
+                "text": str(src.get("text") or "")[:80].replace("\n", " "),
+            }
+        messages = []
+        seq = itertools.count(1)
+        for r in rows:
+            kind = str(r.get("kind") or "")
+            segs = r.get("segs") or []
+            if not isinstance(segs, list) or not segs:
+                segs = [{"type": "text", "data": {"text": str(r.get("text") or "")}}]
+            sid = str(r.get("sender_id") or "")
+            if kind == "user":
+                uid, name, role = int(self.cfg.owner_id or 0), self.scfg.owner_nickname, "owner"
+            elif kind == "system":
+                uid, name, role = 0, "系统", "system"
+            else:
+                uid = int(sid) if sid.isdigit() else 0
+                name = str(r.get("sender_name") or "成员")
+                role = "member"
+            item = {
+                "message_id": str(r.get("mid") or f"g{r.get('id')}"),
+                "real_seq": next(seq),
+                "message_type": "group",
+                "post_type": "message",
+                "group_id": int(gid) if gid.isdigit() else gid,
+                "time": int(float(r.get("ts") or 0)),
+                "sender": {"user_id": uid, "nickname": name, "card": name,
+                           "role": role, "level": levels.get(sid, 1), "title": ""},
+                "message": segs,
+                "raw_message": str(r.get("text") or ""),
+            }
+            q = quoted.get(int(r.get("reply_to") or 0))
+            if q:
+                item["reply"] = q
+            messages.append(item)
+        return {"messages": messages, "result": None, "echo": None}
+
+    # ---------------- 群管理类 API ----------------
+
+    def _gapi(self):
+        if not self.group_api:
+            raise ValueError("群聊功能不可用")
+        return self.group_api
+
+    @staticmethod
+    def _gid_of(params: Dict[str, Any]) -> str:
+        return str(params.get("group_id") or params.get("group") or "").strip()
+
+    @staticmethod
+    def _truthy(v: Any, default: bool = True) -> bool:
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() not in ("", "0", "false", "no", "none")
+
+    async def api_get_group_info(self, params: Dict[str, Any]) -> Any:
+        gid = self._gid_of(params)
+        if not self._has_group(gid):
+            return None
+        d = self._gapi().group_detail(gid)
+        return {
+            "group_id": int(gid) if gid.isdigit() else 0,
+            "group_name": d["group_name"],
+            "member_count": d["member_count"],
+            "max_member_count": 200,
+            "group_create_time": 0,
+            "group_level": 1,
+            "group_memo": str((d.get("announce") or {}).get("text") or ""),
+        }
+
+    async def api_get_group_member_list(self, params: Dict[str, Any]) -> Any:
+        gid = self._gid_of(params)
+        if not self._has_group(gid):
+            return []
+        d = self._gapi().group_detail(gid)
+        return [{
+            "user_id": int(m["user_id"]) if str(m["user_id"]).isdigit() else 0,
+            "nickname": m["nickname"],
+            "card": m["nickname"],
+            "role": m["role"],
+            "level": int(m.get("level") or 1),
+            "title": str(m.get("title") or ""),
+            "join_time": int(float(m.get("joined_ts") or 0)),
+        } for m in d.get("members", [])]
+
+    async def api_set_group_whole_ban(self, params: Dict[str, Any]) -> None:
+        """全员禁言。enable=false 解除；解除后引擎会补一次「禁言期间的 backlog」。"""
+        gid = self._gid_of(params)
+        if not self._has_group(gid):
+            raise ValueError("没有这个群")
+        on = self._truthy(params.get("enable"), default=True)
+        self._gapi().set_group_mute_all(gid, on)
+
+    async def api_set_group_kick(self, params: Dict[str, Any]) -> None:
+        gid = self._gid_of(params)
+        uid = str(params.get("user_id") or "").strip()
+        if not self._has_group(gid) or not uid:
+            raise ValueError("缺少 group_id / user_id")
+        self._gapi().kick_group_member(gid, uid)
+
+    async def api_set_group_admin(self, params: Dict[str, Any]) -> None:
+        gid = self._gid_of(params)
+        uid = str(params.get("user_id") or "").strip()
+        if not self._has_group(gid) or not uid:
+            raise ValueError("缺少 group_id / user_id")
+        on = self._truthy(params.get("enable"), default=True)
+        self._gapi().set_group_admin(gid, uid, on)
+
+    async def api_set_group_name(self, params: Dict[str, Any]) -> None:
+        gid = self._gid_of(params)
+        name = str(params.get("group_name") or "").strip()
+        if not self._has_group(gid) or not name:
+            raise ValueError("缺少 group_id / group_name")
+        self._gapi().rename_group(gid, name)
+
+    async def api_send_group_notice(self, params: Dict[str, Any]) -> None:
+        """发群公告（每个成员都会记一条 = 她们都看到了）。"""
+        gid = self._gid_of(params)
+        text = str(params.get("content") or params.get("text") or "").strip()
+        if not self._has_group(gid) or not text:
+            raise ValueError("缺少 group_id / content")
+        self._gapi().set_group_announce(gid, text)
+
+    async def api_get_group_notice(self, params: Dict[str, Any]) -> Any:
+        gid = self._gid_of(params)
+        if not self._has_group(gid):
+            return []
+        a = self._gapi().group_detail(gid).get("announce") or {}
+        if not a.get("text"):
+            return []
+        return [{
+            "notice_id": f"n{a.get('rev') or 1}",
+            "sender_id": int(self.cfg.owner_id or 0),
+            "publish_time": int(float(a.get("ts") or 0)),
+            "message": {"text": str(a.get("text") or "")},
+        }]
+
+    async def api_set_group_add_request(self, params: Dict[str, Any]) -> None:
+        """审批入群申请。approve=true 通过。"""
+        gid = self._gid_of(params)
+        uid = str(params.get("user_id") or params.get("flag") or "").strip()
+        if not self._has_group(gid) or not uid:
+            raise ValueError("缺少 group_id / user_id")
+        approve = str(params.get("approve", True)).lower() in ("true", "1", "yes")
+        self._gapi().resolve_group_request(gid, uid, approve)
+
+    async def api_get_group_system_msg(self, _p: Dict[str, Any]) -> Any:
+        return {"InvitedRequest": [], "join_requests": []}
+
+    async def api_set_group_card(self, _p: Dict[str, Any]) -> None:
+        return None
+
+    async def api_set_group_special_title(self, _p: Dict[str, Any]) -> None:
+        return None
+
+    async def api_set_group_portrait(self, _p: Dict[str, Any]) -> None:
+        return None
+
+    async def api_upload_group_file(self, params: Dict[str, Any]) -> None:
+        """群文件上传（OneBot 口子）。自托管链路里只有 base64:// 能真正落地
+        —— NapCat 那种「传本地路径」在这里没有意义（文件不在服务端）。"""
+        gid = self._gid_of(params)
+        if not self._has_group(gid):
+            raise ValueError("没有这个群")
+        f = str(params.get("file") or "")
+        name = str(params.get("name") or "file")
+        if f.startswith("base64://"):
+            try:
+                blob = base64.b64decode(f[len("base64://"):])
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(f"base64 解析失败：{e}") from e
+            self._gapi().add_group_file(gid, name, blob,
+                                        uploader=self.scfg.owner_nickname)
+        return None
 
     # ---------------- 杂项 API ----------------
 
@@ -1574,6 +2063,245 @@ class OneBotServerChannel:
             return web.json_response({"ok": True, **(data or {})})
         except Exception as e:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    # ---------------- 在线状态（QQ 式） ----------------
+
+    async def _api_presence_get(self, request: web.Request) -> web.Response:
+        if not self.presence_get:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            data = self.presence_get()
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_presence_post(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.presence_set:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        body = body if isinstance(body, dict) else {}
+        status_key = str(body.get("status") or "").strip()
+        if not status_key:
+            return web.json_response({"ok": False, "error": "缺少 status"},
+                                     status=400)
+        try:
+            data = self.presence_set(status_key)
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    # ---------------- 群聊（HTTP，给自建页面与测试用） ----------------
+
+    async def _api_groups_list(self, request: web.Request) -> web.Response:
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            return web.json_response({
+                "ok": True,
+                "groups": self.group_api.groups_payload(),
+                "requests": self.group_api.group_join_requests(),
+            })
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_detail(self, request: web.Request) -> web.Response:
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        gid = str(request.query.get("group_id") or "").strip()
+        try:
+            return web.json_response({"ok": True,
+                                      **self.group_api.group_detail(gid)})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_history(self, request: web.Request) -> web.Response:
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        gid = str(request.query.get("group_id") or "").strip()
+        try:
+            count = int(request.query.get("count") or 40)
+        except (TypeError, ValueError):
+            count = 40
+        try:
+            rows = self.group_api.group_messages(gid, count)
+            return web.json_response({"ok": True, "messages": rows})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_create(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            data = self.group_api.create_group(
+                str(body.get("name") or ""), body.get("members") or [])
+            return web.json_response({"ok": True, **data})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_manage(self, request: web.Request) -> web.Response:
+        """一个入口管所有群操作：op 决定动作，避免十几个端点。"""
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        body = body if isinstance(body, dict) else {}
+        op = str(body.get("op") or "").strip()
+        gid = str(body.get("group_id") or "").strip()
+        uid = str(body.get("user_id") or "").strip()
+        try:
+            api = self.group_api
+            if op == "kick":
+                data = api.kick_group_member(gid, uid)
+            elif op == "admin":
+                data = api.set_group_admin(gid, uid, bool(body.get("on", True)))
+            elif op == "announce":
+                data = api.set_group_announce(gid, str(body.get("text") or ""))
+            elif op == "mute":
+                data = api.set_group_mute_all(gid, bool(body.get("on", True)))
+            elif op == "rename":
+                data = api.rename_group(gid, str(body.get("name") or ""))
+            elif op == "searchable":
+                data = api.set_group_searchable(gid, bool(body.get("on", True)))
+            elif op == "resolve":
+                data = api.resolve_group_request(gid, uid,
+                                                 bool(body.get("approve", True)))
+            elif op == "invite":
+                data = api.invite_group_member(gid, uid, str(body.get("name") or ""))
+            elif op == "join":
+                api.apply_join_group(gid, uid, str(body.get("name") or ""),
+                                     str(body.get("note") or ""))
+                data = api.group_detail(gid)
+            elif op == "limits":
+                vals = body.get("values")
+                data = api.set_group_limits(gid, vals if isinstance(vals, dict) else {})
+            else:
+                raise ValueError(f"未知操作 {op!r}")
+            return web.json_response({"ok": True, **data})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_identity(self, _request: web.Request) -> web.Response:
+        """登录页要用的身份信息（连接前就能拿到）：我是谁 + 品牌名。
+
+        登录页要显示「我」的头像，但那时还没有 WS 连接、拿不到 get_login_info，
+        所以单开一个不需要鉴权的小接口。
+        """
+        owner = str(self.cfg.owner_id or "")
+        return web.json_response({
+            "ok": True,
+            "owner_id": int(owner) if owner.isdigit() else 0,
+            "owner_nickname": self.scfg.owner_nickname,
+            "bot_nickname": self.scfg.bot_nickname,
+        })
+
+    # ---------------- 群文件 / 群相册 ----------------
+
+    async def _api_groups_files(self, request: web.Request) -> web.Response:
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        gid = str(request.query.get("group_id") or "").strip()
+        try:
+            return web.json_response({"ok": True,
+                                      "files": self.group_api.group_files(gid)})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_upload(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        body = body if isinstance(body, dict) else {}
+        raw = str(body.get("data") or "")
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1]
+        try:
+            blob = base64.b64decode(raw)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad base64"},
+                                     status=400)
+        try:
+            item = self.group_api.add_group_file(
+                str(body.get("group_id") or ""), str(body.get("name") or "file"),
+                blob, uploader=self.scfg.owner_nickname)
+            return web.json_response({"ok": True, "file": item})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_file_del(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.group_api:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            self.group_api.remove_group_file(str(body.get("group_id") or ""),
+                                             str(body.get("file_id") or ""),
+                                             by=self.scfg.owner_nickname)
+            return web.json_response({"ok": True})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_groups_file_get(self, request: web.Request) -> web.StreamResponse:
+        if not self.group_api:
+            return web.Response(status=404)
+        gid = str(request.query.get("group_id") or "").strip()
+        fid = str(request.query.get("file_id") or "").strip()
+        path = None
+        try:
+            path = self.group_api.group_file_path(gid, fid)
+        except Exception:  # noqa: BLE001
+            path = None
+        if not path:
+            return web.Response(status=404)
+        name = quote(path.name)
+        return web.FileResponse(path, headers={
+            "Cache-Control": "public, max-age=86400",
+            "Content-Disposition": f"inline; filename*=UTF-8''{name}",
+        })
 
     # ---------------- 自定义聊天头像 ----------------
 

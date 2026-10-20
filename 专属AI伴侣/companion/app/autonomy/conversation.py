@@ -114,6 +114,7 @@ class ConversationRunner:
         sender_name: str = "",
         trait_text: str = "",
         delay_scale: float = 1.0,
+        presence_text: str = "",
     ):
         self.cfg = cfg
         self.bcfg = bcfg
@@ -129,6 +130,7 @@ class ConversationRunner:
         self.sender_name = sender_name
         self.trait_text = trait_text
         self.delay_scale = delay_scale
+        self.presence_text = presence_text
         self.conv = ConvState()
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()
@@ -436,6 +438,7 @@ class ConversationRunner:
             resume_hint=resume_hint,
             self_facts_text=self.memory.self_facts_text(),
             trait_text=self.trait_text,
+            presence_text=self.presence_text,
         )
         if gen != self.conv.generation:
             return None                                # 表达期间对方插话，草稿作废

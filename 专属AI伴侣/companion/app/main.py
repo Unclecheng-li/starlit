@@ -33,10 +33,14 @@ from .channel.napcat import (
 from .channel.onebot_server import OneBotServerChannel
 from .characters import CharacterRegistry
 from .config import Config, load_config
+from .group import GroupRuntime, Member
+from .group_store import GroupRegistry
 from .guest import GuestRuntime
 from .llm import LLM
 from .memory import Memory
 from .perceive import describe_image, load_first_image, tag_emotion
+from .presence import (get_presence, greet_cooldown_ok, mark_greeted,
+                       presence_payload, presence_text, set_status)
 from .state import EMOTION_TO_EVENT, StateMachine
 from .sticker import StickerLibrary, StickerPolicy, StickerStealer
 from .store import Store
@@ -53,6 +57,14 @@ CONSOLE_ENC = "gbk" if os.name == "nt" else "utf-8"
 
 # 互道收尾时的超短回应。收尾循环里再长篇大论就是恐怖片。
 _SHORT_CLOSINGS = ("嗯，晚安", "晚安", "嗯嗯，拜拜", "好，明天见", "嗯，去忙吧")
+
+# 角色「搜到群 → 想进来」时递的入群理由（真人申请入群也就这一句半句）
+JOIN_REQUEST_NOTES = (
+    "刷到这个群，想进来看看",
+    "听人提过，有点好奇",
+    "想找个地方一起聊天",
+    "看看你们平时都在聊什么",
+)
 
 # 表情包相关的「收下/斗图/入库」说法 —— 真实聊天里极少出现（0.2%）。
 # 除了提示词约束，再兜一层：模型偶尔会照抄历史里的旧句式，必须拦掉。
@@ -104,12 +116,21 @@ class Companion:
         self.primary_traits = get_traits(self.characters.primary.id,
                                          self.characters.primary.name)
         ensure_defaults(self.characters.all())
-        autonomy_cfg = derive_autonomy(self.base_autonomy, self.primary_traits)
+        # ★ 在线状态（QQ 式）：叠在热情之上的一层乘数 —— 决定「你现在
+        #   方不方便被找」。必须在派生配置之前读，否则初始排期用的是旧状态。
+        self.presence = get_presence()
+        self.presence_text = presence_text(self.presence)
+        autonomy_cfg = derive_autonomy(self.base_autonomy, self.primary_traits,
+                                       self.presence)
         conv_cfg = derive_conversation(self.base_conversation,
-                                       self.primary_traits)
+                                       self.primary_traits, self.presence)
         self._guests: Dict[str, GuestRuntime] = {}
         self._guest_pending: Dict[str, List[IncomingMessage]] = {}
         self._guest_tasks: Dict[str, asyncio.Task] = {}
+        # 群聊：群索引 + 每个群一个引擎（懒创建）
+        self.groups = GroupRegistry(cfg)
+        self._group_runtimes: Dict[str, GroupRuntime] = {}
+        self._group_scout_task: Optional[asyncio.Task] = None
         self.store = Store(cfg.resolve(cfg.memory.db_path))
         self._ignored_count = 0
         self._ignored_last_log = 0.0
@@ -148,6 +169,9 @@ class Companion:
                 character_creator=self.create_character,
                 traits_get=self.get_character_traits,
                 traits_set=self.set_character_traits,
+                presence_get=self.get_presence,
+                presence_set=self.set_presence,
+                group_api=self,
             )
         else:
             self.channel = NapCatChannel(cfg.qq, self.handle, dump_dir=self.dump_dir)
@@ -164,12 +188,15 @@ class Companion:
             self.suppressor, self.sender, self.digest, cfg.read_persona,
             trait_text=trait_text(self.primary_traits),
             delay_scale=self.primary_traits.delay_scale,
+            presence_text=self.presence_text,
+            schedule=self.characters.primary.schedule,
         )
         self.conversation = ConversationRunner(
             conv_cfg, cfg.behavior, cfg.qq, self.store, self.llm,
             self.state, self.memory, self.sender, self.suppressor, cfg.read_persona,
             trait_text=trait_text(self.primary_traits),
             delay_scale=self.primary_traits.delay_scale,
+            presence_text=self.presence_text,
         )
 
     # ---------------- 多角色 ----------------
@@ -270,10 +297,16 @@ class Companion:
               f"（{trait_text(t).splitlines()[0]}）")
         return traits_payload(cid, char.name)
 
-    def _apply_primary_traits(self, t) -> None:
-        auto = derive_autonomy(self.base_autonomy, t)
-        conv = derive_conversation(self.base_conversation, t)
-        self.primary_traits = t
+    def _refresh_primary_config(self) -> None:
+        """用当前的热情 + 在线状态重算星野的派生配置，并立即重排主动消息。
+
+        热情和状态都会走到这里 —— 它们是同一层结构（都是乘数），
+        所以任何一边变了都整体重算一次，避免两套逻辑互相覆盖。
+        """
+        t = self.primary_traits
+        p = self.presence
+        auto = derive_autonomy(self.base_autonomy, t, p)
+        conv = derive_conversation(self.base_conversation, t, p)
         self.heartbeat.cfg = auto
         self.heartbeat.rhythm.cfg = auto
         self.suppressor.cfg = auto
@@ -283,7 +316,480 @@ class Companion:
         self.heartbeat.delay_scale = t.delay_scale
         self.conversation.trait_text = trait_text(t)
         self.conversation.delay_scale = t.delay_scale
+        self.presence_text = presence_text(p)
+        self.heartbeat.presence_text = self.presence_text
+        self.conversation.presence_text = self.presence_text
         self.heartbeat.replan()
+
+    def _apply_primary_traits(self, t) -> None:
+        self.primary_traits = t
+        self._refresh_primary_config()
+
+    # ---------------- 在线状态（QQ 式） ----------------
+
+    def get_presence(self) -> dict:
+        return presence_payload(self.presence)
+
+    async def set_presence(self, key: str) -> dict:
+        """切换在线状态：立即生效 + 广播到所有角色 + 需要时来一句问候。
+
+        和 QQ 一样是**手动**切换。切到「在线 / Q我吧」视为「上线」，
+        好友会主动来打招呼；「离线 / 隐身」只降低频率，不会完全不发；
+        「请勿打扰」是唯一真的安静下来的状态。
+        """
+        prev_p = self.presence
+        p, prev_key = set_status(key)
+        self.presence = p
+        self.presence_text = presence_text(p)
+        # 主角色
+        self._refresh_primary_config()
+        # 全部新增角色（含还没实例化的：下次实例化时会读到新状态）
+        for g in list(self._guests.values()):
+            g.apply_presence(p)
+        print(f"[presence] 状态：{prev_p.label} → {p.label}"
+              f"（主动频率 ×{p.freq:g}，接话 ×{p.follow:g}"
+              f"{'，完全不主动' if p.silent else ''}）")
+        # ★ 上线打招呼：从「非在线」切到「在线 / Q我吧」才算「上线」。
+        #   反向切换（下线/隐身）不触发，避免每切一下都被刷屏。
+        if p.greet and not prev_p.greet and prev_p.key not in ("online", "qme"):
+            if not self.suppressor.in_quiet_hours() and greet_cooldown_ok():
+                mark_greeted()
+                asyncio.create_task(self._presence_greet_wave())
+        return presence_payload(p)
+
+    async def _presence_greet_wave(self) -> None:
+        """上线打招呼：星野先开口，再挑几个好感高的角色错峰跟上。
+
+        不做成「全场同时刷屏」—— 真人朋友不会在你在线上线的瞬间
+        集体出现。星野最先（她是最亲近的），其他人随机排序、间隔 25~70 秒。
+        """
+        try:
+            if self.suppressor.in_quiet_hours():
+                return
+            await asyncio.sleep(random.uniform(5.0, 20.0))
+            if self.suppressor.in_quiet_hours() or not self._channel_connected():
+                return
+            d = await self.heartbeat.poke_once(force=True, kind="miss",
+                                               force_go=True)
+            print(f"[presence] 上线问候（星野）：{d}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"[presence] 上线问候出错：{e!r}")
+
+        # 再挑几个角色：好感高的优先，最多 3 个，彼此错峰
+        try:
+            guests = []
+            for c in self.characters.guests():
+                g = self._guests.get(c.id)
+                if g:
+                    guests.append((g.traits.affection, random.random(), g))
+            guests.sort(key=lambda x: (-x[0], x[1]))
+            picks = [g for _a, _r, g in guests[:3]]
+            for i, g in enumerate(picks):
+                if self.suppressor.in_quiet_hours() or not self._channel_connected():
+                    return
+                await asyncio.sleep(random.uniform(25.0, 70.0))
+                if self.suppressor.in_quiet_hours() or not self._channel_connected():
+                    return
+                try:
+                    d = await g.greet()
+                    print(f"[presence] 上线问候（{g.char.name}）：{d}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[presence] 上线问候（{g.char.name}）出错：{e!r}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"[presence] 角色上线问候出错：{e!r}")
+
+
+    # ---------------- 群聊 ----------------
+
+    def _group_member(self, cid: str) -> Optional[Member]:
+        """把「星野」或某个新增角色统一成同一个「群成员」形状。
+
+        星野没有 GuestRuntime（她的运行时是 Companion 自己那套），所以这里
+        做一层适配 —— 引擎就不用关心成员内部是哪种角色了。
+        """
+        cid = str(cid or "")
+        char = self.characters.get(cid)
+        if not char:
+            return None
+        if char.is_primary:
+            return Member(
+                id=cid, name=char.name,
+                persona=self.cfg.read_persona("persona.md"),
+                boundaries=self.cfg.read_persona("boundaries.md"),
+                world=self.cfg.read_persona("world.md"),
+                state=self.state, memory=self.memory, store=self.store,
+                traits=self.primary_traits,
+                delay_scale=self.primary_traits.delay_scale,
+                schedule=char.schedule,
+            )
+        g = self._guest_for(cid)
+        if not g:
+            return None
+        return Member(id=cid, name=char.name, persona=g.char.persona,
+                      boundaries=g.boundaries, world="",
+                      state=g.state, memory=g.memory, store=g.store,
+                      traits=g.traits, delay_scale=g.traits.delay_scale,
+                      schedule=char.schedule)
+
+    def group_store_for(self, gid: str):
+        """★ 群 id 绝不能走 `store_for`（它对未知 peer 会回落到主人格的库）。"""
+        return self.groups.store_for(gid)
+
+    @staticmethod
+    def _schedule_text_for(char) -> str:
+        """角色的作息提示词（没配作息、或正在清醒时段 → 空串）。"""
+        sch = getattr(char, "schedule", None)
+        if sch is None:
+            return ""
+        try:
+            return sch.scene_text()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def group_runtime_for(self, gid: str) -> Optional[GroupRuntime]:
+        key = str(gid or "")
+        if not key or not self.groups.exists(key):
+            return None
+        rt = self._group_runtimes.get(key)
+        if rt:
+            return rt
+        group = self.groups.get(key)
+        rt = GroupRuntime(
+            self.cfg, group, self.groups, self.llm, self.sender,
+            self._group_member,
+            presence_getter=lambda: self.presence,
+            quiet_check=self.suppressor.in_quiet_hours,
+            on_system=self._push_group_system,
+        )
+        self._group_runtimes[key] = rt
+        if getattr(self, "_started", False):
+            rt.start()
+        print(f"[main] 群已就绪：{group.name}（{key}）｜"
+              f"成员 {len(rt.store.members())} 人")
+        return rt
+
+    def _push_group_system(self, gid: str, text: str) -> None:
+        """群里的系统消息（建群/改名/入群/踢人/公告）→ 立刻推给打开的客户端。
+
+        引擎写 system() 时是同步调用，这里把异步推送丢进事件循环，不阻塞。
+        """
+        fn = getattr(self.channel, "push_group_system", None)
+        if not fn:
+            return
+        try:
+            asyncio.create_task(fn(gid, text))
+        except RuntimeError:  # 没有运行中的事件循环（测试收尾）→ 静默
+            pass
+
+    async def _handle_group(self, msg: IncomingMessage) -> None:
+        """自建群里的消息：只服务主人，交给群引擎。"""
+        if self.cfg.qq.owner_id and msg.user_id != self.cfg.qq.owner_id:
+            self._note_ignored("群聊", msg.group_id,
+                               f"不是主人（只认 {self.cfg.qq.owner_id}）")
+            return
+        rt = self.group_runtime_for(msg.group_id)
+        if not rt:
+            return
+        await rt.on_owner_message(msg)
+
+    # ---- 对外的群接口（channel 的 action / 网页的 HTTP 端点都走这里）----
+
+    def groups_payload(self) -> List[dict]:
+        out: List[dict] = []
+        for g in self.groups.all():
+            st = self.groups.store_for(g.id)
+            out.append({
+                "group_id": g.id,
+                "group_name": g.name,
+                "avatar": g.avatar,
+                "member_count": len(st.members()),
+                "mute_all": bool(st.mute_all().get("on")),
+                "searchable": bool(st.meta().get("searchable", True)),
+                "announce": str(st.announcement().get("text") or ""),
+                "pending": len(st.pending_requests()),
+            })
+        return out
+
+    def group_detail(self, gid: str) -> dict:
+        g = self.groups.get(gid)
+        if not g:
+            raise ValueError("没有这个群")
+        st = self.groups.store_for(gid)
+        members = st.members()
+        out = []
+        for uid, m in members.items():
+            out.append({
+                "user_id": str(uid),
+                "nickname": str(m.get("nickname") or uid),
+                "role": str(m.get("role") or "member"),
+                "level": int(st.member_level(uid)),
+                "title": str(m.get("title") or ""),
+                "joined_ts": float(m.get("joined_ts") or 0),
+                "muted_until": float(m.get("muted_until") or 0),
+                "is_me": str(uid) == str(self.cfg.qq.owner_id or ""),
+            })
+        # 群主排第一，其余按角色/入群时间
+        out.sort(key=lambda x: (x["role"] != "owner", x["joined_ts"]))
+        rt = self.group_runtime_for(gid)
+        return {
+            "group_id": g.id, "group_name": g.name, "avatar": g.avatar,
+            "member_count": len(members), "members": out,
+            "mute_all": bool(st.mute_all().get("on")),
+            "searchable": bool(st.meta().get("searchable", True)),
+            "announce": st.announcement(),
+            # ★ 待审申请统一带上 user_id（库里存的是 uid）—— 前端以前读 r.user_id
+            #   取到 undefined，点同意就等于把空 uid 发给后端 → 「没有这个申请」。
+            "pending": [{**r, "user_id": str(r.get("uid") or "")}
+                        for r in st.pending_requests()],
+            "limits": rt.limits_payload() if rt else [],
+        }
+
+    def set_group_limits(self, gid: str, values: dict) -> dict:
+        """改这个群的节奏参数（人数上限/每人额度/接话概率…）。"""
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        rt.apply_limits(values or {})
+        return self.group_detail(gid)
+
+    def group_messages(self, gid: str, count: int = 40) -> List[dict]:
+        """群历史（给 channel 拼 OneBot 段用）。"""
+        if not self.groups.exists(str(gid)):
+            return []
+        st = self.groups.store_for(gid)
+        return st.recent_gmsgs(max(1, min(200, int(count or 40))))
+
+    def create_group(self, name: str, member_ids: Optional[List[str]] = None) -> dict:
+        owner_id = str(self.cfg.qq.owner_id or "")
+        names = {c.id: c.name for c in self.characters.all()}
+        picked = [str(x) for x in (member_ids or []) if str(x) in names
+                  and str(x) != owner_id]
+        limit = max(1, int(self.cfg.group.max_members) - 1)
+        g = self.groups.create(
+            name, owner_id, self.cfg.qq.server.owner_nickname,
+            member_ids=picked[:limit], member_names=names,
+        )
+        self.group_runtime_for(g.id)
+        return self.group_detail(g.id)
+
+    def invite_group_member(self, gid: str, uid: str, name: str = "") -> dict:
+        """群主**直接**拉人入群。
+
+        不走「申请入群」那条路：那条会受「允许被搜索」开关限制，群主关掉搜索后
+        连自己邀请都会被拒（实测会报「这个群不允许被搜索」）。这里直接加成员。
+        """
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        uid = str(uid or "")
+        if not uid:
+            raise ValueError("缺少 user_id")
+        if rt.store.member(uid):
+            raise ValueError("这个人已经在群里了")
+        limit = max(1, int(self.cfg.group.max_members) - 1)
+        if len(rt.store.members()) - 1 >= limit:
+            raise ValueError(f"群满了（上限 {limit + 1} 人）")
+        if not name:
+            char = self.characters.get(uid)
+            name = char.name if char else uid
+        rt.store.add_member(uid, name, role="member")
+        rt.system(f"{name} 加入了群聊")
+        print(f"[main] 群 {gid} 邀请了 {name}（{uid}）")
+        return self.group_detail(gid)
+
+    def kick_group_member(self, gid: str, uid: str) -> dict:
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        uid = str(uid or "")
+        m = rt.store.member(uid)
+        if not m:
+            raise ValueError("这个人不在群里")
+        if str(m.get("role")) == "owner":
+            raise ValueError("不能移出群主")
+        rt.store.remove_member(uid)
+        rt.system(f"{m.get('nickname') or uid} 被移出了群聊")
+        print(f"[main] 群 {gid} 移出成员 {uid}")
+        return self.group_detail(gid)
+
+    def set_group_admin(self, gid: str, uid: str, on: bool = True) -> dict:
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        m = rt.store.set_member(str(uid), role="admin" if on else "member")
+        if not m:
+            raise ValueError("这个人不在群里")
+        rt.system(f"{m.get('nickname') or uid} "
+                  + ("被设为管理员" if on else "被取消管理员"))
+        return self.group_detail(gid)
+
+    def set_group_announce(self, gid: str, text: str) -> dict:
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        rt.post_announcement(str(text or ""),
+                             by=self.cfg.qq.server.owner_nickname)
+        print(f"[main] 群 {gid} 发布公告（{len(rt.ai_member_ids())} 人已看到）")
+        return self.group_detail(gid)
+
+    def set_group_mute_all(self, gid: str, on: bool) -> dict:
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        rt.set_mute_all(bool(on), by=self.cfg.qq.server.owner_nickname)
+        print(f"[main] 群 {gid} 全员禁言 = {bool(on)}")
+        return self.group_detail(gid)
+
+    def rename_group(self, gid: str, name: str) -> dict:
+        if not self.groups.rename(gid, name):
+            raise ValueError("改群名失败")
+        rt = self.group_runtime_for(gid)
+        if rt:
+            rt.group.name = name.strip()
+            rt.system(f"群名改为「{name.strip()}」")
+        return self.group_detail(gid)
+
+    def set_group_searchable(self, gid: str, on: bool) -> dict:
+        if not self.groups.exists(gid):
+            raise ValueError("没有这个群")
+        self.groups.store_for(gid).set_meta(searchable=bool(on))
+        return self.group_detail(gid)
+
+    # ---- 群文件 / 群相册 ----
+
+    _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+    def group_files(self, gid: str) -> List[dict]:
+        gid = str(gid or "")
+        if not self.groups.exists(gid):
+            return []
+        items = self.groups.store_for(gid).kv_get("files", [])
+        if not isinstance(items, list):
+            return []
+        return [x for x in items if isinstance(x, dict) and x.get("id")]
+
+    def group_file_path(self, gid: str, fid: str):
+        """按 file_id 找真实文件路径（只认登记过的 id，防路径穿越）。"""
+        want = str(fid or "")
+        for it in self.group_files(gid):
+            if str(it.get("id")) == want and it.get("stored"):
+                p = self.groups.files_dir(gid) / str(it["stored"])
+                if p.is_file():
+                    return p
+        return None
+
+    def add_group_file(self, gid: str, name: str, blob: bytes,
+                       uploader: str = "") -> dict:
+        """把一份文件放进群文件/群相册（图片自动归到相册）。"""
+        gid = str(gid or "")
+        if not self.groups.exists(gid):
+            raise ValueError("没有这个群")
+        if not blob:
+            raise ValueError("空文件")
+        if len(blob) > 20 * 1024 * 1024:
+            raise ValueError("文件太大（上限 20MB）")
+        safe = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", str(name or "file").strip())
+        safe = (safe or "file")[:60]
+        ext = Path(safe).suffix.lower()
+        fid = f"f{int(time.time() * 1000)}{random.randint(0, 999):03d}"
+        d = self.groups.files_dir(gid)
+        d.mkdir(parents=True, exist_ok=True)
+        stored = fid + ext
+        (d / stored).write_bytes(blob)
+        item = {
+            "id": fid,
+            "name": safe,
+            "size": len(blob),
+            "kind": "image" if ext in self._IMAGE_EXT else "file",
+            "stored": stored,
+            "uploader": str(uploader or ""),
+            "ts": time.time(),
+        }
+        st = self.groups.store_for(gid)
+        items = self.group_files(gid)
+        items.append(item)
+        st.kv_set("files", items[-200:])          # 只留最近 200 份登记
+        rt = self.group_runtime_for(gid)
+        if rt:
+            rt.system(f"{uploader or '有人'} 上传了文件「{safe}」")
+        print(f"[main] 群 {gid} 新增文件：{safe}（{len(blob)} 字节）")
+        return item
+
+    def remove_group_file(self, gid: str, fid: str, by: str = "") -> dict:
+        """删一份群文件。by = 发起人显示名：群主能删任何文件，其他人只能删自己传的。"""
+        gid = str(gid or "")
+        fid = str(fid or "")
+        items = self.group_files(gid)
+        keep, target = [], None
+        for it in items:
+            if str(it.get("id")) == fid:
+                target = it
+            else:
+                keep.append(it)
+        if target is None:
+            raise ValueError("没有这个文件")
+        owner = str(self.cfg.qq.server.owner_nickname or "")
+        uploader = str(target.get("uploader") or "")
+        if uploader and by and by != owner and uploader != by:
+            raise ValueError("只能删自己上传的文件")
+        self.groups.store_for(gid).kv_set("files", keep)
+        try:
+            (self.groups.files_dir(gid) / str(target.get("stored") or "")).unlink()
+        except OSError:
+            pass
+        return {"group_id": gid, "file_id": fid}
+
+    def group_join_requests(self, gid: str = "") -> List[dict]:
+        if gid:
+            st = self.groups.store_for(gid)
+            return st.pending_requests()
+        out: List[dict] = []
+        for g in self.groups.all():
+            for r in self.groups.store_for(g.id).pending_requests():
+                out.append({**r, "user_id": str(r.get("uid") or ""),
+                            "group_id": g.id,
+                            "group_name": self.groups.get(g.id).name})
+        return out
+
+    def resolve_group_request(self, gid: str, uid: str, approve: bool) -> dict:
+        rt = self.group_runtime_for(gid)
+        if not rt:
+            raise ValueError("没有这个群")
+        req = rt.store.resolve_join_request(str(uid), bool(approve))
+        if not req:
+            raise ValueError("没有这个申请")
+        name = str(req.get("name") or uid)
+        if approve:
+            # ★ 已经在群里就不要再播一次「加入了群聊」——实测出现同一个人
+            #   （橘雪莉）两条入群系统消息：她先被邀请进群，申请又被点了同意。
+            if rt.store.member(str(uid)):
+                return self.group_detail(gid)
+            rt.store.add_member(str(uid), name, role="member")
+            rt.system(f"{name} 加入了群聊")
+        else:
+            rt.system(f"{name} 的入群申请被拒绝")
+        return self.group_detail(gid)
+
+    def apply_join_group(self, gid: str, uid: str, name: str = "",
+                         note: str = "") -> dict:
+        """某个角色申请入群（本人/自动触发都走这里）。"""
+        g = self.groups.get(gid)
+        if not g:
+            raise ValueError("没有这个群")
+        st = self.groups.store_for(gid)
+        if not bool(st.meta().get("searchable", True)):
+            raise ValueError("这个群不允许被搜索")
+        if str(uid) in st.members():
+            raise ValueError("已经在群里了")
+        req = st.add_join_request(str(uid), name or str(uid), note)
+        if not req:
+            raise ValueError("已经申请过了，等群主处理")
+        print(f"[main] {name or uid} 申请加入群「{g.name}」（待人审）")
+        return req
 
     def _next_character_id(self) -> str:
         nums = []
@@ -439,6 +945,8 @@ class Companion:
         self._conv_task = asyncio.create_task(self.conversation.run())
         # 新增角色：各自的心跳 / 接话也一起跑起来（只换人格，习惯不变）
         self._start_guests()
+        # 群聊：每个群有自己的节奏（不定时有人起话头、别人接话）
+        self._start_groups()
         # ★ 看门狗只在 napcat 链路有意义（修的是 NapCat/QQ 进程）。
         # onebot-server 模式下没有 QQ —— 断线=客户端没连着，
         # 不需要（也不应该）触发 NapCat 修复任务。
@@ -456,6 +964,74 @@ class Companion:
             if g:
                 g.start()        # 幂等：确保每个学生的模块都真的跑起来
 
+    def _start_groups(self) -> None:
+        """把已有的群引擎都跑起来（幂等）。"""
+        for g in self.groups.all():
+            rt = self.group_runtime_for(g.id)
+            if rt:
+                rt.start()
+        if self._group_scout_task is None or self._group_scout_task.done():
+            self._group_scout_task = asyncio.create_task(self._group_join_scout())
+
+    # ---------------- 「搜到群 → 申请加入」----------------
+
+    async def _group_join_scout(self) -> None:
+        """让还没进群的角色偶尔「搜到」可被搜索的群，递一条入群申请。
+
+        用户要的：「其他好友也能搜索到群聊申请加入」。这里不假装有人在搜群
+        —— 就是给每个角色一段随机长的时间，到点了她刷到这个群、想进来看看，
+        于是递申请；群主在网页右侧的「入群申请」里同意或拒绝。
+        """
+        await asyncio.sleep(random.uniform(240.0, 900.0))
+        while True:
+            try:
+                await self._group_join_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                print(f"[group] 入群申请巡查出错：{e!r}")
+            await asyncio.sleep(random.uniform(1500.0, 4200.0))
+
+    async def _group_join_once(self) -> None:
+        if self.presence.silent or not self._channel_connected():
+            return
+        groups = self.groups.all()
+        if not groups:
+            return
+        limit = max(1, int(self.cfg.group.max_members) - 1)
+        now = time.time()
+        cooldown = max(1, int(self.cfg.group.join_request_cooldown_h)) * 3600
+        for g in groups:
+            st = self.groups.store_for(g.id)
+            if not bool(st.meta().get("searchable", True)):
+                continue
+            members = st.members()
+            if len(members) - 1 >= limit:
+                continue
+            for char in self.characters.guests():
+                cid = str(char.id)
+                if cid in members:
+                    continue
+                guest = self._guest_for(cid)
+                if not guest:
+                    continue
+                try:
+                    last = float(guest.store.kv_get("group_join_at", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    last = 0.0
+                if now - last < cooldown:
+                    continue
+                if random.random() > 0.35:
+                    continue
+                guest.store.kv_set("group_join_at", now)
+                try:
+                    self.apply_join_group(g.id, cid, char.name,
+                                          random.choice(JOIN_REQUEST_NOTES))
+                    print(f"[main] {char.name} 想加入群「{g.name}」（待群主审核）")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[main] {char.name} 的入群申请被忽略：{e!r}")
+                return
+
     async def _greet_guests(self) -> None:
         """新增角色的上线问候：错峰发送，避免九个人同时刷屏。"""
         guests = [self._guests[c.id] for c in self.characters.guests()
@@ -467,6 +1043,9 @@ class Companion:
         cap = max(delay, float(getattr(self.cfg.autonomy,
                                       "greet_wait_max_sec", 1200)))
         try:
+            if self.presence.silent:
+                print(f"[main] 角色问候跳过：当前状态是「{self.presence.label}」")
+                return
             await asyncio.sleep(delay)
             waited = 0.0
             while waited < cap:
@@ -565,6 +1144,9 @@ class Companion:
         delay = max(3.0, float(self.cfg.autonomy.greet_delay_sec))
         cap = max(delay, float(getattr(self.cfg.autonomy, "greet_wait_max_sec", 1200)))
         try:
+            if self.presence.silent:
+                print(f"[main] 上线问候跳过：当前状态是「{self.presence.label}」")
+                return
             await asyncio.sleep(delay)
             # 轮询等 NapCat 连上
             waited = 0.0
@@ -642,11 +1224,18 @@ class Companion:
     async def stop(self) -> None:
         self.heartbeat.stop()
         self.conversation.stop()
+        if self._group_scout_task and not self._group_scout_task.done():
+            self._group_scout_task.cancel()
+        self._group_scout_task = None
+        for rt in list(self._group_runtimes.values()):
+            rt.close()
+        self._group_runtimes.clear()
         for g in list(self._guests.values()):
             await g.aclose()
         self._guests.clear()
         await self.channel.stop()
         await self.llm.close()
+        self.groups.close()
         self.store.close()
 
     # ---------------- 消息入口 ----------------
@@ -666,6 +1255,14 @@ class Companion:
         return True   # mention
 
     async def handle(self, msg: IncomingMessage) -> None:
+        # ★ 自建群优先于「外来群闸门」。_group_allowed 是给 NapCat 转发进来
+        #   的**外部**群用的（默认 off，防止小号在学校群里乱开口）；自己建的
+        #   群要是被它拦住，就会出现「我的群永远不吭声」。
+        gid = str(msg.group_id or "")
+        if (not msg.is_private) and gid and self.groups.exists(gid):
+            await self._handle_group(msg)
+            return
+
         # 私聊：只服务主人；群聊：受 group_mode 闸门控制
         if msg.is_private:
             if self.cfg.qq.owner_id and msg.user_id != self.cfg.qq.owner_id:
@@ -998,7 +1595,15 @@ class Companion:
 
         prev_reply_ts = self.heartbeat.last_reply_ts
         gap_h = (_t.time() - prev_reply_ts) / 3600.0 if prev_reply_ts else None
+        # ★ 对方回来之前，我是不是在「等回应」？等了多久？
+        #   （上一条主动消息发出后一直没人回 → 这次回来就是「重逢」）
+        last_spoke = self.heartbeat.last_spoke_ts
+        wait_h = ((_t.time() - last_spoke) / 3600.0
+                  if last_spoke and last_spoke > prev_reply_ts else 0.0)
         self.heartbeat.on_user_message()
+        if wait_h >= 1.0:
+            self.state.note_reunion(wait_h)
+            print(f"[main] 重逢：等了 {wait_h:.1f} 小时终于被回 → 开心/惊喜/撒娇一次")
 
         # ★ 互道收尾循环防护：对方收尾、自己也回过收尾之后，
         # 对方再发一句「晚安」这种收尾话 —— 不再走完整管线
@@ -1020,7 +1625,9 @@ class Companion:
         #   批次可能整批跳过不回话）。真正顶掉在途旧回复的代际 bump
         #   推迟到下面「确定必定要开口」之后，见那边的注释。
         self.conversation.on_user_message(msg.text, bump_generation=False)
-        self.state.tick(last_interaction_ago_h=gap_h, resting=False)
+        # unanswered_h=0：对方开口了 → 「被晾着」的委屈感开始消退
+        self.state.tick(last_interaction_ago_h=gap_h, resting=False,
+                        unanswered_h=0.0)
 
         target = {"user_id": msg.user_id if msg.is_private else "", "group_id": msg.group_id}
 
@@ -1192,6 +1799,7 @@ class Companion:
             image_is_sticker=image_is_sticker,
             time_text=time_text,
             trait_text=relation,
+            presence_text=self.presence_text,
         )
         self.store.kv_set("last_analysis", {**analysis, "emotion_tag": emotion})
         if analysis.get("intent"):
@@ -1287,6 +1895,9 @@ class Companion:
             resume_hint=resume_hint,
             self_facts_text=self.memory.self_facts_text(),
             trait_text=relation,
+            presence_text=self.presence_text,
+            # ★ 作息：凌晨三点被叫醒的人，回话不该精神抖擞（角色各有睡点）
+            schedule_text=self._schedule_text_for(self.characters.primary),
         )
         if not reply:
             return

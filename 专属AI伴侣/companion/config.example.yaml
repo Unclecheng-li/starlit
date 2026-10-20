@@ -179,3 +179,42 @@ search:
 tts:
   provider: ""                     # 尚未接入，接口已留好
   endpoint: ""
+
+# ── 群聊 ──────────────────────────────────────────────────────────
+# 好友们在一间群里互相聊天。默认值就是推荐值，一般不用改。
+# 真要调，优先调 ambient_gap_min（群自己多久起一次话头）。
+group:
+  enabled: true
+  ai_chain_max: 5                  # 连续非我发言的上限（防 AI 互相刷屏）
+  ai_no_owner_max: 8               # 一轮总发言上限
+  chain_cooldown_min: 15           # 说满后的冷却
+  round_gap_reset_min: 6           # 静默多久算新的一轮
+  msgs_per_hour: 18
+  msgs_per_hour_burst: 5
+  daily_max_total: 120
+  daily_max_per_member: 10
+  min_gap_member_sec: 20
+  bubbles_per_turn: 2
+  bubbles_when_mentioned: 3
+  responders: 4                    # 我发言时挑几个人回（各自并发开口，不排队）
+  responders_all_mention: 5
+  responder_gap_sec: [2, 18]       # 每个回应者各自的开口延迟（秒）
+  ambient_enabled: true
+  ambient_gap_min: [8, 25]
+  chain_reply_probability: 0.80    # 有人说完后，别人接一句的概率
+  chain_reply_gap_sec: [10, 50]    # 接话间隔（秒）
+  dedupe_window: 15
+  dedupe_overlap: 0.5
+  backlog_responders: 5
+  backlog_span_sec: [20, 90]
+  share_probability: 0.25          # 自动「把私聊抖进群」的概率
+  share_daily_max: 1
+  jealousy_cooldown_min: 30
+  jealousy_min_affection: 50
+  ambient_share_probability: 0.30  # 群自发节奏里改走「抖私聊」的概率
+  dm_share_probability: 0.15       # 改走「私聊讲群里的动静」的概率
+  dm_share_daily_max: 1            # 每人每天最多私聊分享几次
+  max_members: 20
+  join_request_cooldown_h: 24
+  index_path: "./data/groups.json"
+  dir_path: "./data/groups"

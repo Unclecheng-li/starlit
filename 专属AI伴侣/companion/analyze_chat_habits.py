@@ -308,6 +308,156 @@ def topic_reopen_report(timeline) -> None:
         print("  好友重开话开场样本：" + " | ".join(f"{k}×{v}" for k, v in c.most_common(12)))
 
 
+# 「等待」语气词表（好友侧）。数据驱动：跑完看命中率再决定要不要调。
+_W_WORRY = ("在吗", "在不在", "怎么了", "还好吗", "是不是", "忙吗", "忙不忙",
+            "睡了", "睡着", "生气", "不理我", "回我", "你在哪", "你在干嘛",
+            "你在干嘛呢", "去哪了", "人呢", "怎么不回", "看到没", "有空吗",
+            "你又", "还是没有", "没理我")
+_W_NEEDY = ("呜呜", "呜", "哼", "委屈", "想你", "想我", "难过", "伤心",
+            "不开心", "哭了", "算了", "打扰了", "好烦", "烦我", "别不理我",
+            "我错了", "对不起", "没事了", "打扰")
+
+
+def _tone(txt: str) -> str:
+    """给一条消息打粗标签（顺序敏感：先撒娇/低落，再担心/试探，再问句）。"""
+    if not txt:
+        return "媒体"
+    if any(w in txt for w in _W_NEEDY):
+        return "撒娇/低落"
+    if any(w in txt for w in _W_WORRY):
+        return "担心/试探"
+    if txt.rstrip().endswith(("？", "?")):
+        return "问句"
+    return "普通"
+
+
+def waiting_report(timeline) -> None:
+    """「我发出去、你没回」时好友的恋人式演化。
+
+    对应 vol 的新需求：好友连发后用户长时间不回 → 好友随沉默越来越
+    担心 / 沮丧 / 难过 / 暴露需求感；用户突然回来 → 开心 / 撒娇 / 惊喜。
+
+    三个问题（私聊双流量化）：
+      1. 没人回的时候好友还会继续发吗？发几条？（「追」的程度）
+      2. 语气随「未回复第几条」和「沉默多久」怎么演变？
+      3. 用户消失 ≥2h 后回来，好友第一条怎么反应（延迟 + 形态）？
+    """
+    events = [(t, r, x) for t, r, x in timeline
+              if r in ("user", "friend", "boundary")]
+
+    # ---- 1/2) 好友「说了没人接」的连续段 ----
+    streaks = []          # 每段 = [(沉默时长h, 文本), ...]
+    cur: list = []
+    user_ts = None
+    prev_t = None
+    for t, r, x in events:
+        if r == "boundary":
+            if cur:
+                streaks.append(cur)
+            cur, user_ts, prev_t = [], None, None
+            continue
+        if r == "user":
+            if cur:
+                streaks.append(cur)
+            cur = []
+            user_ts = t
+        else:                       # friend
+            base = user_ts or prev_t or t
+            cur.append(((t - base).total_seconds() / 3600.0, x))
+        prev_t = t
+    if cur:
+        streaks.append(cur)
+
+    if not streaks:
+        print("  （没有样本）")
+        return
+
+    multi = [s for s in streaks if len(s) >= 2]
+    dist = Counter(len(s) for s in streaks)
+    print(f"  好友「说了没人接」的连续段共 {len(streaks)} 段："
+          f"其中继续追（≥2 条）{pct(len(multi) / len(streaks))}")
+    print("  段内条数分布：" + " ".join(f"{k}条×{v}"
+                                       for k, v in sorted(dist.items())))
+    if multi:
+        mx = sorted(len(s) for s in multi)
+        print(f"  追的段长度：中位 {quantiles(mx, 0.5)} 条 | P75 {quantiles(mx, 0.75)} | "
+              f"P90 {quantiles(mx, 0.90)} | 最长 {mx[-1]} 条")
+
+    # 语气随「第几条未回复消息」的演变
+    by_idx: dict = {}
+    for s in streaks:
+        for i, (age_h, txt) in enumerate(s):
+            by_idx.setdefault(min(i, 3), []).append((age_h, _tone(txt)))
+    for idx in sorted(by_idx):
+        rows = by_idx[idx]
+        n = len(rows)
+        tones = Counter(t for _a, t in rows)
+        label = f"第 {idx + 1} 条" if idx < 3 else "第 4 条及以后"
+        print(f"  {label}未回复消息（{n} 条）："
+              + " | ".join(f"{k} {pct(v / n)}" for k, v in tones.most_common()))
+
+    # 语气随「沉默多久」的演变
+    for label, lo, hi in (("0-2h", 0, 2), ("2-8h", 2, 8),
+                          ("8-24h", 8, 24), (">24h", 24, 1e9)):
+        rows = [(_tone(txt), age) for s in streaks for age, txt in s
+                if lo <= age < hi]
+        if not rows:
+            continue
+        tones = Counter(tone for tone, _age in rows)
+        print(f"  沉默 {label}（{len(rows)} 条）："
+              + " | ".join(f"{k} {pct(v / len(rows))}" for k, v in tones.most_common()))
+
+    # ---- 3) 消失 ≥2h 后回来，好友的第一条反应 ----
+    reu = []           # (消失时长h, 首条延迟s, 文本, 回来 5 分钟内好友条数)
+    for i, (t, r, x) in enumerate(events):
+        if r != "user":
+            continue
+        prev_u = None
+        for j in range(i - 1, -1, -1):
+            rj = events[j][1]
+            if rj == "boundary":
+                break
+            if rj == "user":
+                prev_u = events[j][0]
+                break
+        if prev_u is None:
+            continue
+        gap_h = (t - prev_u).total_seconds() / 3600.0
+        if gap_h < 2:
+            continue
+        for k in range(i + 1, len(events)):
+            tt, rr, xx = events[k]
+            if rr == "boundary":
+                break
+            if rr == "friend" and (tt - t).total_seconds() <= 1800:
+                # 「回来那一下」连发几条：只数 300 秒内、且在你再次开口之前
+                burst = 0
+                for m in range(k, len(events)):
+                    tt2, rr2, _x2 = events[m]
+                    if rr2 in ("boundary", "user"):
+                        break
+                    if (tt2 - t).total_seconds() > 300:
+                        break
+                    burst += 1
+                reu.append((gap_h, (tt - t).total_seconds(), xx, burst))
+                break
+
+    if reu:
+        lats = [r[1] for r in reu]
+        bursts = [r[3] for r in reu]
+        tones = Counter(_tone(r[2]) for r in reu)
+        print(f"  用户消失 ≥2h 后回来 {len(reu)} 次：好友首条延迟 中位 "
+              f"{quantiles(lats, 0.5):.0f}s | P25 {quantiles(lats, 0.25):.0f}s | "
+              f"P75 {quantiles(lats, 0.75):.0f}s")
+        print("    回来后的第一条：" + " | ".join(f"{k} {pct(v / len(reu))}"
+                                                 for k, v in tones.most_common()))
+        print(f"    回来 5 分钟内好友条数：中位 {quantiles(bursts, 0.5)} 条 | "
+              f"P75 {quantiles(bursts, 0.75)} | P90 {quantiles(bursts, 0.90)}")
+        c = Counter(r[2][:16] for r in reu if 0 < len(r[2]) <= 16)
+        print("    首条样本：" + " | ".join(f"{k}×{v}"
+                                           for k, v in c.most_common(12)))
+
+
 def interleave_report(timeline) -> None:
     """交错接话分析：对方单条/多条时，真人到底怎么接话。
 
@@ -478,6 +628,11 @@ def main() -> None:
     print("话题重启分析（话题聊死后谁先开口）")
     print("=" * 66)
     topic_reopen_report(timeline)
+    print()
+    print("=" * 66)
+    print("等待分析（我发出去没人回时，好友怎么演变 / 回来时怎么反应）")
+    print("=" * 66)
+    waiting_report(timeline)
 
 
 if __name__ == "__main__":

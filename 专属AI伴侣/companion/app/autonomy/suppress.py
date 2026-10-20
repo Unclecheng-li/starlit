@@ -20,6 +20,7 @@ LLM 复核自己写的稿子时几乎看不出重复（它眼里每条都是"新
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +32,12 @@ from ..think import decide_initiative
 from ..state import StateMachine
 from ..memory import Memory
 from ..llm import LLM
+
+# format_recent 给每行加了「[今天 15:48] 」这样的时间前缀；
+# 第⑦层做行解析时必须先把它剥掉，否则永远匹配不到自己说过的话。
+_TIME_PREFIX = re.compile(r"^\s*\[[^\]]*\]\s*")
+# 「自己说过的话」在历史里的 role 名（新增角色也写 assistant）
+_BOT_ROLES = ("assistant", "小星", "星野")
 
 
 @dataclass
@@ -228,10 +235,13 @@ class Suppressor:
         """
         bot_texts: List[str] = []
         for line in recent or []:
-            if line.startswith("assistant:"):
-                bot_texts.append(line[len("assistant:"):].strip())
-            elif line.startswith("小星:") or line.startswith("星野:"):
-                bot_texts.append(line.split(":", 1)[1].strip())
+            # ★ 容忍 format_recent 的时间前缀：调用方传进来的是
+            #   `[今天 15:48] assistant: 文本`，而这里原来只认裸的
+            #   `assistant:` 开头 → bot_texts 恒为空 → 这一层从未生效。
+            s = _TIME_PREFIX.sub("", str(line or ""))
+            role, sep, body = s.partition(":")
+            if sep and body.strip() and role.strip() in _BOT_ROLES:
+                bot_texts.append(body.strip())
         if not bot_texts or not draft:
             return False, ""
 

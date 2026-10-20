@@ -30,6 +30,7 @@ from .characters import Character
 from .config import Config
 from .memory import Memory
 from .perceive import describe_image, load_first_image
+from .presence import get_presence, presence_text
 from .state import EMOTION_TO_EVENT, StateMachine
 from .sticker import StickerPolicy
 from .store import Store
@@ -95,6 +96,10 @@ class GuestRuntime:
         # 行为习惯照搬星野的配置，再由「热情/好感」派生具体频率：
         # 热情低 → 主动少、回复慢；好感高 → 接话更密、更黏人。
         self.traits = get_traits(char.id, char.name)
+        # ★ 在线状态和星野共用同一份（它是「用户现在方不方便被找」，
+        #   不随角色变）—— 也叠在热情之上。
+        self.presence = get_presence()
+        self.presence_text = presence_text(self.presence)
         self.base_autonomy = replace(
             cfg.autonomy,
             enabled=True,
@@ -103,7 +108,8 @@ class GuestRuntime:
         )
         self.base_conversation = cfg.conversation
         self.autonomy_cfg = self._derived_autonomy(self.traits)
-        self.conv_cfg = derive_conversation(self.base_conversation, self.traits)
+        self.conv_cfg = derive_conversation(self.base_conversation, self.traits,
+                                            self.presence)
 
         def _load(name: str) -> str:
             if name == "persona.md":
@@ -124,6 +130,8 @@ class GuestRuntime:
             sender_id=char.id, sender_name=char.name,
             trait_text=trait_text(self.traits),
             delay_scale=self.traits.delay_scale,
+            presence_text=self.presence_text,
+            schedule=char.schedule,
         )
         self.conversation = ConversationRunner(
             self.conv_cfg, cfg.behavior, cfg.qq, self.store, llm,
@@ -131,6 +139,7 @@ class GuestRuntime:
             sender_id=char.id, sender_name=char.name,
             trait_text=trait_text(self.traits),
             delay_scale=self.traits.delay_scale,
+            presence_text=self.presence_text,
         )
         self.sticker_policy = StickerPolicy(cfg.sticker, self.store)
         self._hb_task = None
@@ -138,7 +147,7 @@ class GuestRuntime:
         self._started = False
 
     def _derived_autonomy(self, t):
-        auto = derive_autonomy(self.base_autonomy, t)
+        auto = derive_autonomy(self.base_autonomy, t, self.presence)
         # 九个角色共用同一套搜索/摘要资源，自主分享最多 2 条/天
         return replace(auto, digest_max_share_per_day=min(
             2, auto.digest_max_share_per_day))
@@ -152,8 +161,19 @@ class GuestRuntime:
     def apply_traits(self, t) -> None:
         """网页上改了热情/好感：立即换配置并重排主动消息。"""
         self.traits = t
+        self._refresh_config()
+
+    def apply_presence(self, p) -> None:
+        """用户切了在线状态：立即换配置并重排主动消息。"""
+        self.presence = p
+        self.presence_text = presence_text(p)
+        self._refresh_config()
+
+    def _refresh_config(self) -> None:
+        """热情 + 在线状态一起重算（和星野同一层结构）。"""
+        t = self.traits
         auto = self._derived_autonomy(t)
-        conv = derive_conversation(self.base_conversation, t)
+        conv = derive_conversation(self.base_conversation, t, self.presence)
         self.autonomy_cfg = auto
         self.conv_cfg = conv
         self.heartbeat.cfg = auto
@@ -165,6 +185,8 @@ class GuestRuntime:
         self.heartbeat.delay_scale = t.delay_scale
         self.conversation.trait_text = trait_text(t)
         self.conversation.delay_scale = t.delay_scale
+        self.heartbeat.presence_text = self.presence_text
+        self.conversation.presence_text = self.presence_text
         self.heartbeat.replan()
 
     # ---------- 生命周期 ----------
@@ -247,8 +269,16 @@ class GuestRuntime:
         image_desc = await self._image_desc(msg, steal=msg.is_private)
 
         # 和星野一样：用户开口 → 重置冷场、刷新活跃会话、排下一次接话
+        # ★ 先记下「回来之前是不是在等回应」 —— 等了很久就是一次重逢
+        prev_reply = self.heartbeat.last_reply_ts
+        last_spoke = self.heartbeat.last_spoke_ts
+        wait_h = ((time.time() - last_spoke) / 3600.0
+                  if last_spoke and last_spoke > prev_reply else 0.0)
         self.heartbeat.on_user_message()
         self.conversation.on_user_message(text, bump_generation=True)
+        if wait_h >= 1.0:
+            self.state.note_reunion(wait_h)
+            print(f"[guest:{self.char.name}] 重逢：等了 {wait_h:.1f} 小时被回")
 
         turns = self.store.recent_turns(12)
         time_text = format_time_context(turns)
@@ -256,7 +286,9 @@ class GuestRuntime:
 
         last_ts = float(turns[-1].get("ts") or 0) if turns else 0.0
         gap_h = (time.time() - last_ts) / 3600.0 if last_ts else None
-        self.state.tick(last_interaction_ago_h=gap_h, resting=False)
+        # unanswered_h=0：对方开口了 → 委屈感消退
+        self.state.tick(last_interaction_ago_h=gap_h, resting=False,
+                        unanswered_h=0.0)
 
         user_text = text or ("（发来一个表情包）" if image_is_sticker
                              else ("（发来一张图片）" if image_desc else "（发来一张图）"))
@@ -271,6 +303,7 @@ class GuestRuntime:
             image_is_sticker=image_is_sticker,
             time_text=time_text,
             trait_text=relation,
+            presence_text=self.presence_text,
         )
         if analysis.get("intent"):
             self.conversation.conv.topic = str(analysis["intent"])
@@ -309,6 +342,13 @@ class GuestRuntime:
                 resume_hint = str(ev.get("text") or "")[:200]
                 break
 
+        # ★ 作息：凌晨三点被叫醒的人，回话不该精神抖擞（每个角色睡点不同）
+        try:
+            sched_text = (self.char.schedule.scene_text()
+                          if self.char.schedule else "")
+        except Exception:  # noqa: BLE001
+            sched_text = ""
+
         reply = await express(
             self.llm,
             persona=self.char.persona,
@@ -333,6 +373,8 @@ class GuestRuntime:
             closing=closing,
             avoid_terms=avoid or None,
             resume_hint=resume_hint,
+            presence_text=self.presence_text,
+            schedule_text=sched_text,
         )
         if not reply:
             print(f"[guest:{self.char.name}] 表达通道返回空，重试一次")
@@ -361,6 +403,8 @@ class GuestRuntime:
                     closing=closing,
                     avoid_terms=avoid or None,
                     resume_hint=resume_hint,
+                    presence_text=self.presence_text,
+                    schedule_text=sched_text,
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[guest:{self.char.name}] 重试也失败：{e!r}")

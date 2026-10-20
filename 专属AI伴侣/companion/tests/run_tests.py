@@ -1583,8 +1583,17 @@ async def test_llm_truncation() -> None:
                                temperature=0.5, max_tokens=1)
             check("max_tokens=1 应当报截断", False, f"居然成功了：{r[:60]!r}")
         except LLMError as e:
-            check("max_tokens 太小会显式报「被截断」（不再静默空串）",
-                  "截断" in str(e) or "空内容" in str(e), str(e)[:90])
+            msg = str(e)
+            if "截断" in msg or "空内容" in msg:
+                check("max_tokens 太小会显式报「被截断」（不再静默空串）", True, "")
+            elif any(k in msg for k in ("502", "upstream", "SSL", "EOF",
+                                        "超时", "timeout", "连接")):
+                # 通道不通（本机代理/上游抖动）不是这条断言要测的东西 ——
+                # 测的是「截断语义」，不是「网络好不好」。别把它算成失败。
+                print(f"  (跳过：模型通道当前不通 —— {msg[:70]})")
+            else:
+                check("max_tokens 太小会显式报「被截断」（不再静默空串）",
+                      False, msg[:90])
     finally:
         await llm.close()
 
@@ -2554,6 +2563,1017 @@ def test_traits() -> None:
         T.TRAITS_FILE = old_file
 
 
+def test_presence() -> None:
+    """在线状态（QQ 式）：状态表、持久化、频率乘数、提示词、打招呼冷却。"""
+    from app import presence as P
+    from app import traits as T
+
+    section("在线状态")
+    old_presence = P.PRESENCE_FILE
+    old_traits = T.TRAITS_FILE
+    P.PRESENCE_FILE = Path(tempfile.mkdtemp()) / "presence.json"
+    T.TRAITS_FILE = Path(tempfile.mkdtemp()) / "character_traits.json"
+    try:
+        check("默认状态是「在线」", P.get_presence().key == "online",
+              P.get_presence().key)
+
+        cur, prev = P.set_status("qme")
+        check("set_status 返回新状态", cur.key == "qme", cur.key)
+        check("set_status 返回旧状态", prev == "online", prev)
+        check("状态已落盘", P.get_presence().key == "qme", P.get_presence().key)
+
+        try:
+            P.set_status("dancing")
+            rejected = False
+        except ValueError:
+            rejected = True
+        check("非法状态被拒绝", rejected, "没有这个状态")
+
+        check("Q我吧 的提示词写明「有空、来找我」",
+              "有空" in P.presence_text(P.get_presence()),
+              P.presence_text(P.get_presence()))
+        P.set_status("online")
+        check("在线（默认态）不注入提示词",
+              P.presence_text(P.get_presence()) == "",
+              repr(P.presence_text(P.get_presence())))
+        P.set_status("offline")
+        check("离线 的提示词写明可以留言",
+              "留言" in P.presence_text(P.get_presence()),
+              P.presence_text(P.get_presence()))
+
+        # 乘数：热情相同，只有状态不同 → 频率不同
+        t = T.Traits(enthusiasm=50, affection=60)
+        base_a = AutonomyConfig()
+        base_c = ConversationConfig()
+        a_on = T.derive_autonomy(base_a, t, P.Presence(key="online"))
+        a_qme = T.derive_autonomy(base_a, t, P.Presence(key="qme"))
+        a_dnd = T.derive_autonomy(base_a, t, P.Presence(key="dnd"))
+        a_off = T.derive_autonomy(base_a, t, P.Presence(key="offline"))
+        a_inv = T.derive_autonomy(base_a, t, P.Presence(key="invisible"))
+
+        check("Q我吧 主动上限高于在线",
+              a_qme.daily_max > a_on.daily_max,
+              f"{a_qme.daily_max} vs {a_on.daily_max}")
+        check("Q我吧 最小间隔更短",
+              a_qme.min_gap_min < a_on.min_gap_min,
+              f"{a_qme.min_gap_min} vs {a_on.min_gap_min}")
+        check("请勿打扰 完全不主动（daily_max=0）",
+              a_dnd.daily_max == 0, str(a_dnd.daily_max))
+        check("请勿打扰 也不主动分享",
+              a_dnd.digest_max_share_per_day == 0,
+              str(a_dnd.digest_max_share_per_day))
+        check("离线 只降低、不为 0",
+              0 < a_off.daily_max < a_on.daily_max,
+              f"{a_off.daily_max} vs {a_on.daily_max}")
+        check("隐身 只降低、不为 0（别断联）",
+              0 < a_inv.daily_max < a_on.daily_max,
+              f"{a_inv.daily_max} vs {a_on.daily_max}")
+        check("离线 间隔更长",
+              a_off.min_gap_min > a_on.min_gap_min,
+              f"{a_off.min_gap_min} vs {a_on.min_gap_min}")
+        check("Q我吧 仍有主动间隔硬上限",
+              30 <= a_qme.max_gap_min <= 2880, str(a_qme.max_gap_min))
+        check("Q我吧 更容易走「马上」档",
+              a_qme.rhythm_weights[0] > a_on.rhythm_weights[0],
+              f"{a_qme.rhythm_weights[0]} vs {a_on.rhythm_weights[0]}")
+
+        c_on = T.derive_conversation(base_c, t, P.Presence(key="online"))
+        c_qme = T.derive_conversation(base_c, t, P.Presence(key="qme"))
+        c_dnd = T.derive_conversation(base_c, t, P.Presence(key="dnd"))
+        check("Q我吧 接话窗口更长",
+              c_qme.active_window_min > c_on.active_window_min,
+              f"{c_qme.active_window_min} vs {c_on.active_window_min}")
+        check("请勿打扰 不追话",
+              c_dnd.max_followups_per_topic == 1,
+              str(c_dnd.max_followups_per_topic))
+
+        # 网页端拿到的 payload
+        payload = P.presence_payload(P.Presence(key="qme"))
+        check("payload 带完整状态表",
+              len(payload["statuses"]) == len(P.STATUSES),
+              str(len(payload["statuses"])))
+        check("payload 带标签与频率乘数",
+              payload["label"] == "Q我吧" and payload["freq"] == 2.0,
+              f"{payload['label']}/{payload['freq']}")
+        check("payload 里请勿打扰标记为 silent",
+              [s for s in payload["statuses"]
+               if s["key"] == "dnd"][0]["silent"] is True, "dnd")
+
+        # 打招呼冷却：防「来回切状态被刷屏」
+        P.mark_greeted()
+        check("刚打过招呼 → 冷却未过",
+              P.greet_cooldown_ok(900) is False, "cool")
+        P.reset_greet_cooldown()
+        check("重置后冷却已过", P.greet_cooldown_ok(900) is True, "reset")
+    finally:
+        P.PRESENCE_FILE = old_presence
+        T.TRAITS_FILE = old_traits
+
+
+def test_waiting_and_affection() -> None:
+    """好感倍率 + 等待/重逢：越高越黏、等不到回会难过、回来会开心。"""
+    from app import traits as T
+    from app.state import StateMachine
+
+    section("好感倍率 / 等待与重逢")
+    old_traits = T.TRAITS_FILE
+    T.TRAITS_FILE = Path(tempfile.mkdtemp()) / "character_traits.json"
+    try:
+        base_c = ConversationConfig()
+        warm = T.derive_conversation(base_c, T.Traits(50, 95))
+        cold = T.derive_conversation(base_c, T.Traits(50, 20))
+        check("好感高 → 会话窗口明显更长",
+              warm.active_window_min > cold.active_window_min * 2,
+              f"{warm.active_window_min} vs {cold.active_window_min}")
+        check("好感高 → 追问（想了解你）更多",
+              warm.max_probes_per_topic > cold.max_probes_per_topic,
+              f"{warm.max_probes_per_topic} vs {cold.max_probes_per_topic}")
+        check("好感高 → 接话次数更多",
+              warm.max_followups_per_topic > cold.max_followups_per_topic,
+              f"{warm.max_followups_per_topic} vs {cold.max_followups_per_topic}")
+        check("好感高 → 「想起你」更快",
+              warm.followup_delay_sec[0] < cold.followup_delay_sec[0],
+              f"{warm.followup_delay_sec} vs {cold.followup_delay_sec}")
+        check("好感高 → 一口气说得更多",
+              warm.max_burst_bubbles >= cold.max_burst_bubbles,
+              f"{warm.max_burst_bubbles} vs {cold.max_burst_bubbles}")
+
+        from app.config import AutonomyConfig
+        a_warm = T.derive_autonomy(AutonomyConfig(), T.Traits(50, 95))
+        a_cold = T.derive_autonomy(AutonomyConfig(), T.Traits(50, 20))
+        check("好感高 → 情绪对节奏影响更大",
+              a_warm.state_influence > a_cold.state_influence,
+              f"{a_warm.state_influence} vs {a_cold.state_influence}")
+
+        text_warm = T.trait_text(T.Traits(50, 95))
+        text_cold = T.trait_text(T.Traits(50, 20))
+        check("好感提示词含「先接住情绪」",
+              "先接住" in text_warm, text_warm[:40])
+        check("好感提示词含「对他保持好奇」",
+              "保持好奇" in text_warm, "")
+        check("好感高时提示词明显更亲近",
+              "很在意" in text_warm and "很在意" not in text_cold, "")
+    finally:
+        T.TRAITS_FILE = old_traits
+
+    store = Store(str(Path(tempfile.mkdtemp()) / "state.db"))
+    try:
+        st = StateMachine(store)
+        check("初始没有「被晾着」的委屈感", st.emotion.neglect == 0.0,
+              str(st.emotion.neglect))
+
+        # 等了 6 小时没人回：委屈/焦虑/孤独上升，心情往下掉
+        st.emotion.updated_at = time.time() - 6 * 3600
+        st.tick(unanswered_h=6.0)
+        check("等 6 小时 → 委屈感上升", st.emotion.neglect > 5,
+              str(round(st.emotion.neglect, 1)))
+        check("等 6 小时 → 焦虑上升", st.emotion.anxiety > 12,
+              str(round(st.emotion.anxiety, 1)))
+        check("等 6 小时 → 心情变差", st.emotion.valence < 0,
+              str(round(st.emotion.valence, 1)))
+
+        # 被回了：委屈感很快消退
+        before = st.emotion.neglect
+        st.emotion.updated_at = time.time() - 1 * 3600
+        st.tick(unanswered_h=0.0)
+        check("被回之后委屈感消退", st.emotion.neglect < before,
+              f"{round(before, 1)} → {round(st.emotion.neglect, 1)}")
+
+        # 提示词：在等 → 写进 describe
+        store.counter_set("last_reply_ts", 0.0)
+        store.counter_set("last_spoke_ts", time.time() - 6 * 3600)
+        check("waiting_hours 算出等待时长", 5.5 < st.waiting_hours() < 6.5,
+              str(round(st.waiting_hours(), 2)))
+        d = st.describe()
+        check("等待写进了提示词", "【等待】" in d, d[-80:])
+
+        # 没在等 → 不加等待段
+        store.counter_set("last_reply_ts", time.time())
+        check("被回后不再写等待段", "【等待】" not in st.describe(),
+              st.describe()[-60:])
+
+        # 重逢：很开心
+        v_before = st.emotion.valence
+        st.note_reunion(8.0)
+        check("重逢 → 心情明显变好", st.emotion.valence > v_before,
+              f"{round(v_before, 1)} → {round(st.emotion.valence, 1)}")
+        check("重逢写进了提示词", "【刚重逢】" in st.describe(),
+              st.describe()[-70:])
+        check("重逢提示词要求别翻旧账",
+              "别翻旧账" in st.describe(), "")
+    finally:
+        store.close()
+
+
+async def test_schedule_and_share_card() -> None:
+    """角色作息（各自睡点）+ 「甩分享」卡片。"""
+    from datetime import datetime
+    from app.autonomy.digest import ShareItem, share_card
+    from app.schedule import Schedule, default_for, schedule_for
+
+    section("角色作息 / 分享卡片")
+
+    # ── 睡点判定（含跨午夜）────────────────────────────────
+    night = Schedule(sleep="23:30", wake="08:00")
+    check("23:30~08:00 的人：凌晨 3 点睡着",
+          night.asleep(datetime(2026, 1, 1, 3, 0)), "")
+    check("23:30~08:00 的人：中午 12 点醒着",
+          not night.asleep(datetime(2026, 1, 1, 12, 0)), "")
+    check("边界：睡点当刻算睡着",
+          night.asleep(datetime(2026, 1, 1, 23, 30)), "")
+    check("边界：起点的前一分钟还在睡",
+          night.asleep(datetime(2026, 1, 1, 7, 59)), "")
+    check("边界：起点当刻已醒",
+          not night.asleep(datetime(2026, 1, 1, 8, 0)), "")
+
+    # 夜班（星野那种「夜里执勤、白天补觉」）
+    nightshift = Schedule(sleep="05:30", wake="13:00", nocturnal=True)
+    check("夜班的人：凌晨 3 点醒着",
+          not nightshift.asleep(datetime(2026, 1, 1, 3, 0)), "")
+    check("夜班的人：上午 9 点在睡",
+          nightshift.asleep(datetime(2026, 1, 1, 9, 0)), "")
+
+    # 午睡
+    napper = Schedule(sleep="00:00", wake="07:00", nap=["13:00", "14:00"])
+    check("午睡时段算睡着",
+          napper.asleep(datetime(2026, 1, 1, 13, 30)), "")
+    check("午睡之外不受影响",
+          not napper.asleep(datetime(2026, 1, 1, 15, 0)), "")
+
+    # 排期：睡着时把主动心跳推到起床之后
+    check("睡着时「距离起床」是正数（03:00 → 08:00 = 300 分钟）",
+          abs(night.minutes_until_wake(datetime(2026, 1, 1, 3, 0)) - 300) < 1,
+          str(night.minutes_until_wake(datetime(2026, 1, 1, 3, 0))))
+    check("醒着时「距离起床」是 0",
+          night.minutes_until_wake(datetime(2026, 1, 1, 12, 0)) == 0.0, "")
+
+    # 清醒度：中间满格、刚醒/快睡是坡
+    check("白天清醒度满格",
+          night.wakefulness(datetime(2026, 1, 1, 15, 0)) > 0.99, "")
+    check("刚起床（+10 分钟）清醒度不满",
+          night.wakefulness(datetime(2026, 1, 1, 8, 10)) < 0.8, "")
+    check("睡着时清醒度是 0",
+          night.wakefulness(datetime(2026, 1, 1, 3, 0)) == 0.0, "")
+
+    # 提示词：睡着 / 刚醒 / 清醒三种
+    check("睡着时提示词写清了「被震醒、要带困意」",
+          "震醒" in night.scene_text(datetime(2026, 1, 1, 3, 0))
+          and "困" in night.scene_text(datetime(2026, 1, 1, 3, 0)), "")
+    check("刚起床的提示词不一样",
+          "刚起来" in night.scene_text(datetime(2026, 1, 1, 8, 10)), "")
+    check("清醒时段不注入作息块（别无谓占提示词）",
+          night.scene_text(datetime(2026, 1, 1, 15, 0)) == "", "")
+
+    # ── 默认派生：同一个名字永远同一份，不同名字天然错开 ──────
+    a = default_for("天童凯伊")
+    b = default_for("天童凯伊")
+    check("没配作息的角色：同名拿到同一份（重启不漂）",
+          (a.sleep, a.wake) == (b.sleep, b.wake), f"{a.sleep}/{b.sleep}")
+    names = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛"]
+    sleeps = {default_for(n).sleep for n in names}
+    check("不同角色的睡点天然错开（不是全一样）",
+          len(sleeps) >= 2, str(sorted(sleeps)))
+    check("配了 persona/schedules.json 的角色以配置为准",
+          schedule_for("星野", {"星野": Schedule(sleep="04:00", wake="12:00")}
+                       ).sleep == "04:00", "")
+
+    # ── 群引擎：睡着的人不主动开口，但被点名会答 ─────────────
+    from app.group import GroupRuntime
+    check("群引擎判定「她在睡」用的就是作息对象",
+          hasattr(GroupRuntime, "_asleep"), "")
+
+    # ── 「甩分享」卡片 ──────────────────────────────────────
+    item = ShareItem(text="标题。摘要", url="https://example.com/a",
+                     score=9.0, topic="游戏", angle="值得聊",
+                     title="某个有趣的新闻", desc="一句话摘要")
+    card = share_card(item)
+    import json as _json
+    inner = _json.loads(card["data"]["data"])
+    check("卡片是 OneBot 的 json 段",
+          card["type"] == "json", str(card)[:80])
+    check("卡片带标题/链接/来源",
+          inner["meta"]["news"]["title"] == "某个有趣的新闻"
+          and inner["meta"]["news"]["jumpUrl"] == "https://example.com/a"
+          and inner["meta"]["news"]["tag"] == "example.com",
+          str(inner["meta"]["news"]))
+    check("没链接时不产卡片（退回纯文本气泡）",
+          share_card(ShareItem(text="t", url="", score=1, topic="x")) == {}, "")
+
+    # ── 卡片真的走到了通道（不是构出来就丢了）──────────────────
+    from app.act import Sender
+    from app.channel.console import ConsoleChannel
+
+    beh = tmpcfg().behavior
+    for _k in ("bubble_delay_ms", "sticker_delay_ms", "chunk_delay_ms",
+               "short_bubble_delay_ms", "long_bubble_delay_ms"):
+        setattr(beh, _k, [0, 0])
+    ch = ConsoleChannel(owner_id="10001")
+    snd = Sender(ch, beh)
+    await snd.reply("看这个", user_id="10001", card=card)
+    check("卡片随文字一起发到了通道（console 记成［json］）",
+          bool(ch._out_lines) and ch._out_lines[-1] == "［json］",
+          str(ch._out_lines))
+    await snd.reply("没有卡片就只发文字", user_id="10001")
+    check("没有卡片时不会多出一条",
+          ch._out_lines[-1] != "［json］", str(ch._out_lines[-3:]))
+
+
+def test_group_store() -> None:
+    """群库：建群 / 每条消息一行 / mid 与单调时间戳 / 成员 / 公告 / 禁言 / 申请。"""
+    from app.config import GroupConfig
+    from app.group_store import GroupRegistry, GroupStore
+
+    section("群存储")
+    d = Path(tempfile.mkdtemp())
+    cfg = tmpcfg()
+    cfg.group = GroupConfig(index_path=str(d / "groups.json"),
+                            dir_path=str(d / "groups"))
+    reg = GroupRegistry(cfg)
+    check("初始没有群", reg.all() == [], str(len(reg.all())))
+
+    g = reg.create("测试群", "10001", "老师",
+                   member_ids=["10000", "10002"],
+                   member_names={"10000": "星野", "10002": "学生甲"})
+    check("建群后出现在列表", reg.exists(g.id), g.id)
+    st = reg.store_for(g.id)
+    mem = st.members()
+    check("群主已入群且是 owner",
+          str((mem.get("10001") or {}).get("role")) == "owner", str(mem.keys()))
+    check("拉进来的两个成员都在",
+          "10000" in mem and "10002" in mem, str(list(mem)))
+
+    r1 = st.add_gmsg(kind="char", sender_id="10000", sender_name="星野",
+                     text="第一条群消息")
+    r2 = st.add_gmsg(kind="char", sender_id="10002", sender_name="学生甲",
+                     text="第二条群消息")
+    check("mid 用 g<id> 命名空间且互不相同",
+          r1["mid"].startswith("g") and r2["mid"] != r1["mid"],
+          f"{r1['mid']} / {r2['mid']}")
+    check("时间戳单调递增（同一秒也不会撞）",
+          float(r2["ts"]) > float(r1["ts"]), f"{r1['ts']} / {r2['ts']}")
+    check("按 mid 能查回那一条",
+          (st.find_gmsg(r2["mid"]) or {}).get("text") == "第二条群消息", "")
+    check("段结构能存能取",
+          (st.add_gmsg(kind="char", sender_id="2001", sender_name="甲",
+                       text="带图",
+                       segs=[{"type": "image", "data": {"file": "x.png"}}]
+                       ) or {}).get("segs", [{}])[0].get("type") == "image", "")
+
+    st.set_cursor("10000", int(r1["id"]))
+    check("已读游标能读回", st.cursor("10000") == int(r1["id"]),
+          str(st.cursor("10000")))
+    check("backlog 能取到游标之后的消息",
+          len(st.msgs_since(st.cursor("10000"))) >= 2,
+          str(len(st.msgs_since(st.cursor("10000")))))
+
+    a = st.set_announcement("今晚九点集合", by="老师")
+    check("公告落库并带版本号",
+          a["text"] == "今晚九点集合" and int(a["rev"]) == 1, str(a))
+    check("禁言默认是关的", st.mute_all()["on"] is False, "")
+    st.set_mute_all(True, by="老师")
+    check("禁言能落盘", st.mute_all()["on"] is True, "")
+    check("禁言存的是绝对时间戳（重启不会静默解禁）",
+          float(st.mute_all()["ts"]) > 0, str(st.mute_all()["ts"]))
+
+    check("入群申请能入队",
+          st.add_join_request("10003", "学生乙") is not None, "")
+    check("同一个人的重复申请不再入队",
+          st.add_join_request("10003", "学生乙") is None, "")
+    check("待审列表 1 条", len(st.pending_requests()) == 1, "")
+    st.resolve_join_request("10003", True)
+    check("审批后不再待审", len(st.pending_requests()) == 0, "")
+    check("通过后可以拉进群", st.add_member("10003", "学生乙") is not None, "")
+
+    check("撤销会标记 revoked",
+          (st.revoke_gmsg(r2["mid"]) or {}).get("revoked") == 1, "")
+    check("默认查询不返回已撤回",
+          all(not int(r.get("revoked") or 0)
+              for r in st.recent_gmsgs(20, include_revoked=False)), "")
+
+    st2 = GroupStore(reg.db_path(g.id))
+    check("重开库数据还在（真的落盘了）",
+          st2.find_gmsg(r1["mid"]) is not None, "")
+    st2.close()
+    reg.close()
+
+
+async def test_group_engine() -> None:
+    """群引擎：选人 / 硬上限 / 跨角色复读 / 禁言与 backlog / 自发话题。"""
+    from app.act import Sender
+    from app.channel.console import ConsoleChannel
+    from app.channel.napcat import IncomingMessage
+    from app.config import GroupConfig
+    from app.group import GroupRuntime, Member
+    from app.group_store import GroupRegistry
+    from app.memory import Memory
+    from app.state import StateMachine
+    from app.traits import Traits
+    from tests.mock_llm import MockLLM
+
+    class GroupLLM(MockLLM):
+        """每次生成都给一句**互不重合**的假台词。
+
+        为什么需要它：MockLLM 每次返回同一个字符串时，第二个开口的角色
+        会被引擎的「跨角色复读」拦截 —— 那正是引擎该做的事，但会让测试
+        误判成失败。这里让每句台词的字都不重合，4-gram 交集为空。
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._n = 0
+
+        async def chat(self, messages, **kw):
+            blob = "\n".join(str(m.get("content") or "") for m in messages)
+            if "情绪标注器" in blob or "对话分析器" in blob:
+                return await super().chat(messages, **kw)
+            self._n += 1
+            base = 0x4E00 + self._n * 32
+            return "".join(chr(base + i) for i in range(6))
+
+    section("群引擎")
+    d = Path(tempfile.mkdtemp())
+    cfg = tmpcfg()
+    # 把上限压小、把等待压成 0，测试才能在毫秒级里确定性地推进
+    cfg.group = GroupConfig(
+        index_path=str(d / "groups.json"), dir_path=str(d / "groups"),
+        ambient_enabled=False, ai_chain_max=2, ai_no_owner_max=4,
+        responders=3, responder_gap_sec=[0, 0], bubbles_per_turn=1,
+        min_gap_member_sec=0, daily_max_per_member=99,
+        msgs_per_hour=99, daily_max_total=999,
+        backlog_responders=3, backlog_span_sec=[0, 0],
+        # 自发节奏里的两个随机分支（抖私聊 / 私聊讲群里的动静）默认压成 0，
+        # 让「群会自己起话头」这条断言保持确定性；下面再单独打开来测。
+        ambient_share_probability=0.0, dm_share_probability=0.0,
+        # 接话任务也压掉概率，避免它异步起来干扰「群会自己起话头」的断言
+        chain_reply_probability=0.0, chain_reply_gap_sec=[0, 0],
+    )
+    for k in ("bubble_delay_ms", "short_bubble_delay_ms", "long_bubble_delay_ms"):
+        setattr(cfg.behavior, k, [0, 0])
+
+    ch = ConsoleChannel(self_id="10000", owner_id="10001")
+    llm = GroupLLM()
+    sender = Sender(ch, cfg.behavior)
+
+    members = {}
+    stores = []
+
+    def mk(cid: str, name: str, aff: int) -> Member:
+        st = Store(str(d / f"{cid}.db"))
+        stores.append(st)
+        return Member(id=cid, name=name, persona="你是测试角色。", boundaries="",
+                      world="", state=StateMachine(st), memory=Memory(st, None),
+                      store=st, traits=Traits(enthusiasm=60, affection=aff),
+                      delay_scale=1.0)
+
+    for cid, name, aff in (("2001", "甲", 80), ("2002", "乙", 60),
+                           ("2003", "丙", 45)):
+        members[cid] = mk(cid, name, aff)
+
+    reg = GroupRegistry(cfg)
+    g = reg.create("测试群", "10001", "老师", member_ids=list(members),
+                   member_names={c: m.name for c, m in members.items()})
+    rt = GroupRuntime(cfg, g, reg, llm, sender,
+                      lambda cid: members.get(str(cid)))
+
+    def owner_msg(text: str, segs=None) -> IncomingMessage:
+        return IncomingMessage(
+            kind="group", user_id="10001", group_id=g.id, peer_id=g.id,
+            text=text,
+            raw={"message": segs or [{"type": "text",
+                                      "data": {"text": text}}]},
+        )
+
+    try:
+        picks = rt.pick("随便说点什么", 2, {"2003"}, False, set())
+        check("被 @ 的人一定被挑中", "2003" in picks, str(picks))
+        check("挑的人数不超过上限", len(picks) <= 2, str(picks))
+        check("挑出来的都是群成员",
+              all(p in members for p in picks), str(picks))
+
+        await rt.on_owner_message(owner_msg("大家晚上好"))
+        spoke = ch._out_senders[:]
+        check("我发言后有人回应", len(spoke) >= 1, str(spoke))
+        check("回应者报的是群成员的名字",
+              all(s in ("甲", "乙", "丙") for s in spoke), str(spoke))
+        rows = rt.store.recent_gmsgs(20, include_revoked=False)
+        check("我的话落库了",
+              any(r["kind"] == "user" and "大家晚上好" in r["text"]
+                  for r in rows), "")
+        check("角色的话也落库了",
+              sum(1 for r in rows if r["kind"] == "char") == len(spoke),
+              f"{sum(1 for r in rows if r['kind'] == 'char')} vs {len(spoke)}")
+
+        spoken = ch._out_lines[-1]
+        dup = rt.dup_reason(spoken)
+        check("跨角色复读能被识别（拿真说过的话去比）",
+              dup != "", dup or "（没识别出来）")
+        check("完全不同的新话不会被误判",
+              rt.dup_reason("另外一件完全不相干的事情") == "", "")
+
+        ok, why = rt.can_speak("2001")
+        check("连续接话到上限 / 本轮说满后不再开口", not ok, why)
+        check("拦下来的原因是上限或冷却",
+              ("上限" in why or "冷却" in why), why)
+
+        # ── 全员禁言 ────────────────────────────────────────
+        rt.store.set_mute_all(True, by="老师")
+        n_before = len(ch._out_lines)
+        await rt.on_owner_message(owner_msg("禁言期间我发的消息"))
+        check("禁言期间我发的消息照样落库",
+              any("禁言期间我发的消息" in r["text"] for r in
+                  rt.store.recent_gmsgs(6, include_revoked=False)), "")
+        check("禁言期间没有任何人回话",
+              len(ch._out_lines) == n_before, str(ch._out_lines[n_before:]))
+        last_id = int(rt.store.recent_gmsgs(1)[-1]["id"])
+        check("禁言期间不推进游标（攒着 backlog）",
+              all(rt.store.cursor(c) < last_id for c in members),
+              str({c: rt.store.cursor(c) for c in members}))
+        check("backlog 里能看到禁言期间的内容",
+              "禁言期间我发的消息" in rt.backlog_text(), rt.backlog_text()[:40])
+
+        # ── 解禁后补话 ──────────────────────────────────────
+        rt.store.set_mute_all(False, by="老师")
+        rt._cooldown_until = 0.0        # 让「补话」不被上一轮的冷却挡住
+        n2 = len(ch._out_lines)
+        await rt.backlog_wave()
+        check("解禁后有人接着回禁言期间的话",
+              len(ch._out_lines) > n2, str(ch._out_lines[n2:]))
+        check("补话人数不超过上限",
+              len(ch._out_lines) - n2 <= rt.gcfg.backlog_responders,
+              f"{len(ch._out_lines) - n2}")
+
+        # ── 群自己的节奏 ────────────────────────────────────
+        rt.gcfg.ambient_enabled = True
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        n3 = len(ch._out_lines)
+        out = await rt.tick_once(now=time.time() + 3600)
+        check("群会自己起话头",
+              bool(out) and len(ch._out_lines) > n3, str(out))
+
+        # ── 争宠：吃醋 / 被冷落（走真实情绪状态机）──────────────
+        # 注意顺序：抖私聊本身也会点着吃醋，所以先把吃醋单独测掉。
+        poss_before = members["2002"].state.relationship.possessiveness
+        hot = rt.spark_jealousy("2001", 0.6)
+        check("吃醋只点着好感够高的人（好感 45 的丙不在内）",
+              "2003" not in hot and "2002" in hot, str(hot))
+        check("吃醋真的改了她的内部状态（占有欲上升）",
+              members["2002"].state.relationship.possessiveness > poss_before,
+              f"{poss_before:.1f} → "
+              f"{members['2002'].state.relationship.possessiveness:.1f}")
+        check("吃醋有节流：紧接着再来一次点不动",
+              rt.spark_jealousy("2001", 0.6) == [], "")
+        check("被冷落也走同一套情绪入口（另有独立节流）",
+              rt.mark_ignored(["2001"], 0.3) == ["2002"],
+              "被点名的人不算被冷落")
+
+        # ── 接话：有人说完之后，另一个人会接一句（修「A 没人理」）──
+        rt.gcfg.chain_reply_probability = 1.0
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        rt.store.set_mute_all(False, by="老师")
+        rt.store.add_gmsg(kind="char", sender_id="2002", sender_name="乙",
+                          text="这句话等着别人接")
+        n_chain = len(ch._out_lines)
+        await rt._chain_reply("2002")
+        check("别人说完后有人接话（不是自己接自己）",
+              len(ch._out_lines) > n_chain
+              and ch._out_senders[-1] in ("甲", "丙"),
+              str(ch._out_senders[n_chain:]))
+        rt.gcfg.chain_reply_probability = 0.0
+        rt._chain_task = None
+        rt._kick_chain("2002")
+        check("概率为 0 时不排接话任务（需要一个确定性开关）",
+              rt._chain_task is None, "")
+
+        # ── 每群可调的节奏参数（群里那套「发言额度」，界面上有滑杆）──
+        before = rt.gcfg.daily_max_per_member
+        rt.apply_limits({"daily_max_per_member": 3,
+                         "chain_reply_probability": 40})
+        check("能改本群的每日额度", rt.gcfg.daily_max_per_member == 3,
+              str(rt.gcfg.daily_max_per_member))
+        check("百分比类参数按 0~1 存",
+              abs(rt.gcfg.chain_reply_probability - 0.4) < 1e-6,
+              str(rt.gcfg.chain_reply_probability))
+        check("越界的值会被夹到范围内",
+              rt.apply_limits({"msgs_per_hour": 9999}) is not None
+              and rt.gcfg.msgs_per_hour == 60, str(rt.gcfg.msgs_per_hour))
+        payload = rt.limits_payload()
+        check("给界面的参数表带上了范围/单位/当前值",
+              all(k in payload[0] for k in
+                  ("key", "label", "min", "max", "step", "unit", "value"))
+              and any(x["key"] == "daily_max_per_member"
+                      and x["value"] == 3 for x in payload),
+              str(payload[:1]))
+        # 落盘 + 重载：换一个 runtime 实例（模拟重启）也要读到改过的值
+        rt.apply_limits({"daily_max_per_member": 4})
+        rt2 = GroupRuntime(cfg, g, reg, llm, sender,
+                           lambda cid: members.get(str(cid)))
+        check("改动落在这个群自己的库里（重启后仍在）",
+              rt2.gcfg.daily_max_per_member == 4,
+              str(rt2.gcfg.daily_max_per_member))
+        check("没改过的群不会被别的群带跑（各群一份参数）",
+              cfg.group.daily_max_per_member == 99,
+              str(cfg.group.daily_max_per_member))
+        rt.apply_limits({"daily_max_per_member": before})
+
+        # ── 说满当日上限的人不能在挑人时被选中 ──────────────
+        # （实测事故：三个人都到上限后，我发言群里一片安静 —— 因为挑中了
+        #   他们、然后 speak 里又被 can_speak 拦掉）
+        rt.gcfg.daily_max_per_member = 1
+        check("全员说满当日上限时，挑人直接挑不到（而不是挑了再被拦）",
+              rt.pick("随便说说", 3, set(), False, set()) == [], "")
+        # ── @ / 叫名字必须有回应（用户实测：@ 凯伊她不出来说话）──────
+        # 根因是 pick() 把「今天说够了」的人一刀切掉，被 @ 也一样被切。
+        check("不点名时她确实被每日上限挡着",
+              rt.can_speak("2003")[0] is False, rt.can_speak("2003")[1])
+        check("被点名的人不受每日上限限制（can_speak）",
+              rt.can_speak("2003", mention=True)[0] is True, "")
+        check("到上限的人被点名后仍会被挑中",
+              "2003" in rt.pick("丙你在吗", 3, {"2003"}, False, set()),
+              str(rt.pick("丙你在吗", 3, {"2003"}, False, set())))
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        n_ment = len(ch._out_lines)
+        await rt.on_owner_message(owner_msg("丙你在吗", segs=[
+            {"type": "at", "data": {"qq": "2003"}},
+            {"type": "text", "data": {"text": "丙你在吗"}}]))
+        check("被 @ 到「今天说够了」的人也会开口回应",
+              "丙" in ch._out_senders[n_ment:], str(ch._out_senders[n_ment:]))
+        _old = members["2002"].name
+        members["2002"].name = "乙同学"          # 2 字以上的名字才算点名
+        check("文本里直接叫名字也算点名（2 字以上）",
+              rt._named_mentions("乙同学你来说说") == {"2002"},
+              str(rt._named_mentions("乙同学你来说说")))
+        members["2002"].name = _old
+        check("单字名字不会被误判成点名（甲/乙/丙 这种）",
+              rt._named_mentions("甲乙丙丁一起玩") == set(),
+              str(rt._named_mentions("甲乙丙丁一起玩")))
+        rt.gcfg.daily_max_per_member = 99
+
+        # ── 全员说满额度时，我发言也不能集体静默 ────────────────
+        # 实测：我说「哈喽」之后 15 分钟没人应 —— 挑人阶段全被每日额度切掉。
+        rt.gcfg.daily_max_per_member = 1
+        n_over = len(ch._out_lines)
+        await rt.on_owner_message(owner_msg("大家还在吗"))
+        check("全员都到每日额度时，我发言仍会有人应（放宽额度兜底）",
+              len(ch._out_lines) > n_over, str(ch._out_senders[n_over:]))
+        rt.gcfg.daily_max_per_member = 99
+
+        # ── 并发开口：生成锁不覆盖发送（「版聊」的根因之一）──────────
+        # 旧实现把「生成 + 发送」整段锁住：一个角色还在慢慢发气泡时，
+        # 下一个角色连生成都开始不了 —— 于是永远是「A 说完 B 才开始」。
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        class SlowSender:
+            async def reply_bubbles(self, bubbles, **kw):
+                send_started.set()
+                await release_send.wait()
+                return len(bubbles)
+
+        rt.sender = SlowSender()
+        t_a = asyncio.create_task(rt.speak("2001", hint="甲说话", force=True))
+        await asyncio.wait_for(send_started.wait(), 5)
+        t_b = asyncio.create_task(rt.speak("2002", hint="乙说话", force=True))
+        stored_b = False
+        for _ in range(60):
+            await asyncio.sleep(0.02)
+            if any(str(r.get("sender_id")) == "2002"
+                   for r in rt.store.recent_gmsgs(8, include_revoked=False)):
+                stored_b = True
+                break
+        check("一个角色在发气泡时，另一个已能生成并落库（不再排队等）",
+              stored_b, str([r.get("sender_id")
+                             for r in rt.store.recent_gmsgs(8, include_revoked=False)]))
+        release_send.set()
+        await asyncio.gather(t_a, t_b, return_exceptions=True)
+        rt.sender = sender
+
+        # ── 面板改过的整型参数不能把群管线打断 ─────────────────
+        # 实测事故：「我在群里说话没人理」。根因是面板把 responders 存成
+        # 5.0（float），pick 里 `[:max(1, 5.0)]` 抛
+        # TypeError: slice indices must be integers —— 每次发言都在引擎里
+        # 异常退出，而 _safe_handle 只打一行 repr，日志看不出是哪一行。
+        rt.apply_limits({"responders": 5})
+        check("面板改过的整型参数落成 int（不是 5.0）",
+              isinstance(rt.gcfg.responders, int),
+              type(rt.gcfg.responders).__name__)
+        rt.store.kv_set("limits", {"responders": 5.0, "bubbles_per_turn": 3.0})
+        rt3 = GroupRuntime(cfg, g, reg, llm, sender,
+                           lambda cid: members.get(str(cid)))
+        check("重启后从群库读到的整型参数也是 int",
+              isinstance(rt3.gcfg.responders, int)
+              and isinstance(rt3.gcfg.bubbles_per_turn, int),
+              f"{type(rt3.gcfg.responders).__name__}"
+              f"/{type(rt3.gcfg.bubbles_per_turn).__name__}")
+        rt.gcfg.responders = 5.0            # 模拟旧版本写进 gcfg 的浮点遗留
+        check("gcfg 里遗留的浮点 limit 也不会抛切片异常",
+              isinstance(rt.pick("在吗", rt.gcfg.responders, set(), False, set()),
+                         list), "")
+        rt.store.set_mute_all(False, by="老师")
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        n_float = len(ch._out_lines)
+        await rt.on_owner_message(owner_msg("浮点上限下我说话也要有人应"))
+        check("浮点遗留值下我发言仍会有人回应（不再异常退出）",
+              len(ch._out_lines) > n_float, str(ch._out_senders[n_float:]))
+        rt.store.kv_set("limits", {})
+        rt.gcfg.responders = int(rt.gcfg.responders)
+
+        # ── 作息：睡着的人不主动开口，但被点名会答 ─────────────
+        from app.schedule import Schedule as _Sch
+
+        rt.store.set_mute_all(False, by="老师")
+        members["2003"].schedule = _Sch(sleep="00:01", wake="00:00")   # 全天在睡
+        _ok, _why = rt.can_speak("2003")
+        check("她这个点在睡 → 不主动开口（自发话题/接话都走这里）",
+              _ok is False and "睡" in _why, _why or "(居然让她说了)")
+        check("睡着但被点名 → 照样答（真人被叫醒也会应一句）",
+              rt.can_speak("2003", mention=True)[0] is True, "")
+        members["2003"].schedule = None
+        _ok2, _why2 = rt.can_speak("2003")
+        check("拿掉作息就不再被「在睡」挡（没配的一律当醒着）",
+              "睡" not in _why2, _why2 or "(可开口)")
+
+        # 全员都在睡时，我发言也必须有人应 —— 被吵醒也要迷迷糊糊答一句，
+        # 不能因为「作息」把「我说话没人理」这个事故又造回来。
+        for _c in ("2001", "2002", "2003"):
+            members[_c].schedule = _Sch(sleep="00:01", wake="00:00")
+        rt.gcfg.daily_max_per_member = 99
+        rt.store.set_mute_all(False, by="老师")
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        n_sleep = len(ch._out_lines)
+        await rt.on_owner_message(owner_msg("凌晨三点我说句话"))
+        check("全员都在睡时我发言也会有人应（被吵醒也要答一句）",
+              len(ch._out_lines) > n_sleep, str(ch._out_senders[n_sleep:]))
+        for _c in ("2001", "2002", "2003"):
+            members[_c].schedule = None
+
+        # ── 群聊场景进提示词（让她们知道「我在群里说话」）────────
+        scene = rt._group_scene(members["2001"], chained_from="甲",
+                                reply_to_owner=True)
+        check("群场景块讲清楚了「当众说话、不是私聊」",
+              "群聊" in scene and "当众" in scene and "不是一对一私聊" in scene,
+              scene[:60])
+        check("群场景块点名了在场的人",
+              "乙" in scene and "丙" in scene, scene[:120])
+        check("接话场景会点明「接着谁的那句」",
+              "甲" in scene, scene[-80:])
+
+        # ── 群里的等级：累计发言、且和成员列表同源 ──────────────
+        # 实测 bug：聊天气泡上的 LV 和右侧成员列表对不上。两个来源：
+        # ①等级原是按「当天」发言数算的（午夜归零、上午下午不一样）；
+        # ②实时推送的 sender 没带 role/level，客户端只能兜底成 LV1。
+        from app.channel.onebot_server import OneBotServerChannel
+        from app.group_store import GroupStore
+
+        st_lv = GroupStore(str(d / "lv.db"))
+        for i in range(10):
+            st_lv.add_gmsg(kind="char", sender_id="x", text=f"很久以前{i}",
+                           ts=time.time() - 4 * 86400 + i)
+        check("等级按累计发言算（几天前的发言也算数，不午夜归零）",
+              st_lv.member_level("x") == 2, str(st_lv.member_level("x")))
+
+        async def _noop(_m) -> None:
+            return None
+
+        ch_meta = OneBotServerChannel(cfg.qq, _noop, store=None, group_api=None)
+        check("没有群接口时徽章兜底不会炸",
+              ch_meta._group_member_meta("800", "1")["level"] == 1, "")
+
+        # ── 抖私聊进群（好友把和我的私聊片段带进群里）──────────
+        members["2001"].store.add_turn("user", "我今天把模型跑崩了")
+        members["2001"].store.add_turn("assistant", "哈哈哈你也太惨了")
+        snippet = rt._private_snippet("2001")
+        check("能从她的私聊历史里取到片段",
+              "跑崩" in snippet, snippet[:40])
+        check("片段里带上双方的说话人",
+              "我：我今天把模型跑崩了" in snippet, snippet[:60])
+        check("片段按时间正序（最近的排在后面）",
+              snippet.index("跑崩") < snippet.index("太惨"), snippet[:80])
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        n_share = len(ch._out_lines)
+        shr = await rt.share_private_to_group("2001")
+        check("她能把私聊片段说进群里",
+              bool(shr) and len(ch._out_lines) > n_share, str(shr))
+        day = time.strftime("%Y-%m-%d")
+        check("抖私聊记了当日额度",
+              int(rt.store.kv_get(f"share:{day}:2001", 0) or 0) == 1, "")
+        check("同一人当天不会再抖第二次（额度上限 1）",
+              not rt._share_budget_ok("2001"), "")
+
+        # ── 群里的动静 → 私聊（她来找我告状）────────────────
+        rt._cooldown_until = 0.0
+        rt._round_count = 0
+        rt._ai_chain = 0
+        rt.store.set_mute_all(False, by="老师")
+        n_dm = len(ch._out_lines)
+        dm_ok = await rt.share_group_to_owner("2001")
+        check("她能把群里的动静私聊讲给我听",
+              dm_ok and len(ch._out_lines) > n_dm, str(ch._out_lines[n_dm:]))
+        turns = members["2001"].store.recent_turns(3)
+        check("私聊分享也写进了她的私聊历史（重开窗口能回放）",
+              bool(turns) and turns[-1]["role"] == "assistant",
+              str([t["role"] for t in turns]))
+        check("私聊分享有每日上限",
+              not rt._dm_budget_ok("2001"), "")
+
+        # ── 群里「我也被等 / 被冷落」（和私聊的等待同源但独立）────
+        now10 = time.time() + 10 * 3600          # 假装「我 10 小时没在群里露面」
+        before_neg = members["2002"].state.emotion.neglect
+        pushed = rt.apply_group_waiting(now=now10)
+        check("我在群里消失 → 好感够高的人被推进「被晾着」",
+              "2002" in pushed and "2003" not in pushed, str(pushed))
+        check("被晾着真的涨了（neglect）",
+              members["2002"].state.emotion.neglect > before_neg,
+              f"{before_neg:.1f} → "
+              f"{members['2002'].state.emotion.neglect:.1f}")
+        check("等待推进有节流（同一人短时间内只推一次）",
+              rt.apply_group_waiting(now=now10 + 60) == [], "")
+        check("群发言提示词里会带上「群里在等」",
+              "群里在等" in rt._wait_hint(now10), rt._wait_hint(now10)[:40])
+        check("被晾着的小时数记进了状态（group_wait_h ≈ 10）",
+              members["2002"].state.group_wait_h() > 9.0,
+              str(members["2002"].state.group_wait_h()))
+        neg_before = members["2002"].state.emotion.neglect
+        rt._reunion_all(10.0)
+        check("我回到群里 → 被晾着的那口气松掉",
+              members["2002"].state.emotion.neglect < neg_before,
+              f"{neg_before:.1f} → "
+              f"{members['2002'].state.emotion.neglect:.1f}")
+        check("重逢后 group_wait_h 归零",
+              members["2002"].state.group_wait_h() == 0.0,
+              str(members["2002"].state.group_wait_h()))
+        rt.store.set_mute_all(False, by="老师")
+
+        # ── 成员被移出后不再说话 ────────────────────────────
+        rt.store.remove_member("2001")
+        check("移出成员后她不能再发言",
+              await rt.speak("2001", hint="试试", force=True) is None, "")
+    finally:
+        rt.close()
+        for st in stores:
+            st.close()
+        reg.close()
+
+
+async def test_group_files_and_quote() -> None:
+    """群文件 / 群相册（落盘 + 登记）与「引用回复」的 mid 反解。"""
+    from app.channel.console import ConsoleChannel
+    from app.channel.napcat import IncomingMessage
+    from app.config import GroupConfig
+    from app.main import Companion
+
+    section("群文件 / 引用回复")
+    d = Path(tempfile.mkdtemp())
+    cfg = tmpcfg()
+    # ★ 群数据必须改到临时目录，否则跑一次测试就往用户真实 data/ 里灌群
+    cfg.group = GroupConfig(index_path=str(d / "groups.json"),
+                            dir_path=str(d / "groups"))
+    ch = ConsoleChannel(owner_id="10001")
+    comp = Companion(cfg, channel=ch, llm=MockLLM())
+    try:
+        detail = comp.create_group("文件测试群", [])
+        gid = detail["group_id"]
+        check("建群成功", bool(gid), str(detail)[:60])
+
+        a = comp.add_group_file(gid, "笔记.txt", b"hello world")
+        b = comp.add_group_file(gid, "旧照片.png",
+                                b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        check("文本文件归到「文件」", a["kind"] == "file", str(a))
+        check("图片归到「群相册」", b["kind"] == "image", str(b))
+        check("群文件列表里有两条", len(comp.group_files(gid)) == 2, "")
+        p = comp.group_file_path(gid, a["id"])
+        check("能按 file_id 找到落盘文件且内容一致",
+              p is not None and p.read_bytes() == b"hello world", str(p))
+        check("未知 / 穿越式 file_id 拿不到路径",
+              comp.group_file_path(gid, "../../etc/passwd") is None
+              and comp.group_file_path(gid, "nope") is None, "")
+        comp.remove_group_file(gid, a["id"])
+        check("删除后登记和文件都没了",
+              comp.group_file_path(gid, a["id"]) is None
+              and len(comp.group_files(gid)) == 1, "")
+        try:
+            comp.add_group_file(gid, "空.txt", b"")
+            check("空文件被拒", False, "居然接受了")
+        except ValueError:
+            check("空文件被拒", True, "")
+
+        # 邀请直接入群：不走进群申请那条路（那条受「允许被搜索」限制）
+        comp.set_group_searchable(gid, False)
+        d2 = comp.invite_group_member(gid, "3901000011", "古关忧")
+        check("关掉「允许被搜索」后群主仍能邀请人",
+              any(str(m["user_id"]) == "3901000011" for m in d2["members"]),
+              f"member_count={d2.get('member_count')}")
+        try:
+            comp.invite_group_member(gid, "3901000011", "古关忧")
+            check("重复邀请会被拒", False, "居然接受了")
+        except ValueError:
+            check("重复邀请会被拒", True, "")
+        check("群里留了系统消息", any(
+            "加入了群聊" in str(r.get("text") or "")
+            for r in comp.group_messages(gid, 20)), "")
+
+        # 引用回复：引擎按 reply 段里的 mid 反解出库内 id
+        rt = comp.group_runtime_for(gid)
+        row = rt.store.add_gmsg(kind="char", sender_id="9001",
+                                sender_name="甲", text="先有这句话")
+        quote_msg = IncomingMessage(
+            kind="group", user_id="10001", group_id=gid, peer_id=gid,
+            text="引用你一下",
+            raw={"message": [{"type": "reply",
+                              "data": {"id": row["mid"]}},
+                             {"type": "text", "data": {"text": "引用你一下"}}],
+                 "_reply_id": row["mid"]})
+        check("引用段能解析出被引用消息的库内 id",
+              rt._resolve_reply(quote_msg) == int(row["id"]),
+              f"{rt._resolve_reply(quote_msg)} vs {row['id']}")
+        check("没有引用段时返回 0",
+              rt._resolve_reply(IncomingMessage(
+                  kind="group", user_id="10001", group_id=gid, peer_id=gid,
+                  raw={"message": []})) == 0, "")
+        # 一条消息可能被拆成多条气泡推送（mid 形如 gN / gN-2 / gN-3），
+        # 引用第 2、3 条时要按基础 mid 查得到
+        check("引用第 2 条气泡（gN-2）也能反解到库内 id",
+              rt._resolve_reply(IncomingMessage(
+                  kind="group", user_id="10001", group_id=gid, peer_id=gid,
+                  raw={"message": [], "_reply_id": f"{row['mid']}-2"})) == int(row["id"]),
+              f"{row['mid']}-2")
+        # 我自己那条消息：实时 id 是随机序号、库内 mid 是后来才有的 → 靠对照表
+        rt._remember_mid_alias("8123456", str(row["mid"]))
+        check("引用自己刚发的消息（实时随机 id）也能反解（对照表）",
+              rt._resolve_reply(IncomingMessage(
+                  kind="group", user_id="10001", group_id=gid, peer_id=gid,
+                  raw={"message": [], "_reply_id": "8123456"})) == int(row["id"]), "")
+        check("对照表有界（不会无限涨）",
+              len(rt._mid_alias) <= 300, str(len(rt._mid_alias)))
+        # 通道层直接验证：reply_to_mid 会被原样记录（前端引用块的来源）
+        await ch.send_text("插座测试", group_id=gid, sender_id="1",
+                           sender_name="甲", reply_to_mid="MID-XYZ")
+        check("通道记录下被引用的 mid",
+              ch._reply_mids and ch._reply_mids[-1] == "MID-XYZ",
+              str(ch._reply_mids[-1:]))
+        lines_before = len(ch._out_lines)
+        await rt.on_owner_message(quote_msg)
+        # 群里可能有人回话，所以不能假设「最后一条」就是我发的那条
+        rows_after = rt.store.recent_gmsgs(10)
+        mine = [r for r in rows_after
+                if str(r.get("kind")) == "user"
+                and "引用你一下" in str(r.get("text") or "")]
+        check("我发的引用消息把 reply_to 落库了",
+              bool(mine) and int(mine[-1].get("reply_to") or 0) == int(row["id"]),
+              str(mine[-1] if mine else rows_after[-1])[:90])
+        # 角色接我这句话时，被引用消息的 mid 必须真的传到通道（有角色开口才算）
+        if len(ch._out_lines) > lines_before and mine:
+            check("角色接我的话时带上了被引用的 mid",
+                  any(ch._reply_mids[lines_before:]),
+                  str(ch._reply_mids[lines_before:]))
+
+        # ── 实时群消息的徽章必须与右侧成员列表同源（等级/角色/群名片）──
+        # 以前实时 sender 只有 user_id + nickname，聊天气泡兜底成 LV1，
+        # 而成员列表按真实等级算 → 「群聊里的等级和成员列表对不上」。
+        from app.channel.onebot_server import OneBotServerChannel
+
+        async def _on_msg(_m) -> None:
+            return None
+
+        ch_meta = OneBotServerChannel(cfg.qq, _on_msg, store=None, group_api=comp)
+        m_g = next(m for m in comp.group_detail(gid)["members"]
+                   if str(m["user_id"]) == "3901000011")
+        meta = ch_meta._group_member_meta(gid, "3901000011")
+        check("实时群消息的等级与成员列表一致",
+              int(meta["level"]) == int(m_g["level"]), f"{meta} vs {m_g}")
+
+        # ── 群里实时事件的 message_id 必须是**库内 mid**（g<id>）────────
+        # 否则「实时收到的那条」和「刷新后历史里的那条」是两套 id，
+        # 客户端引用即时消息时后端按 mid 查库查不到 → 引用回复整个失效。
+        mids = [m for m in ch._out_mids if m]
+        check("角色在群里发言时，实时事件的 mid 用的是库内 mid（g 开头）",
+              bool(mids) and all(m.startswith("g") for m in mids),
+              str(mids[-3:]))
+        rows_mids = {str(r.get("mid")) for r in rt.store.recent_gmsgs(40)}
+        check("这些 mid 在群库里都查得到（引用才解析得出来）",
+              all(m.split("-")[0] in rows_mids for m in mids), str(mids[-3:]))
+        check("实时群消息带上了角色与群名片",
+              meta["role"] == m_g["role"] and meta["card"] == m_g["nickname"],
+              str(meta))
+        check("未知成员不会炸、回落到 LV1/普通成员",
+              ch_meta._group_member_meta(gid, "999999")["level"] == 1
+              and ch_meta._group_member_meta(gid, "999999")["role"] == "member",
+              "")
+    finally:
+        await comp.stop()
+
+
 async def test_history_recall_and_split() -> None:
     """分条历史 / 稳定 message_id / 撤回（含多气泡只撤一条）。"""
     from app.characters import CharacterRegistry
@@ -2679,6 +3699,12 @@ async def main() -> int:
 
     await test_multi_character()
     test_traits()
+    test_presence()
+    test_waiting_and_affection()
+    await test_schedule_and_share_card()
+    test_group_store()
+    await test_group_engine()
+    await test_group_files_and_quote()
     await test_history_recall_and_split()
     test_hygiene()
     test_sticker_offline()

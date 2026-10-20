@@ -34,6 +34,7 @@ class EmotionState:
     energy: float = 80.0      # 0 ~ 100，社交电量
     anxiety: float = 10.0     # 0 ~ 100
     loneliness: float = 10.0  # 0 ~ 100
+    neglect: float = 0.0      # 0 ~ 100：说了话却等不到回应的「被晾着」的委屈感
     updated_at: float = field(default_factory=time.time)
 
 
@@ -110,8 +111,14 @@ class StateMachine:
         now: Optional[float] = None,
         last_interaction_ago_h: Optional[float] = None,
         resting: bool = False,
+        unanswered_h: Optional[float] = None,
     ) -> float:
-        """按经过的时间推进状态。返回推进的小时数。"""
+        """按经过的时间推进状态。返回推进的小时数。
+
+        `unanswered_h`：我发出去的消息已经多少小时没人回了。
+        None = 不知道（不收不放）；0 = 刚被回应（委屈感消退）；
+        >0.5 = 正在被晾着（越久越担心/沮丧/难过，需求感越强）。
+        """
         now = now or time.time()
         dt = max(0.0, (now - self.emotion.updated_at) / 3600.0)
         if dt <= 0:
@@ -125,6 +132,21 @@ class StateMachine:
             e.energy = _clamp(e.energy + 8.0 * dt)
         else:
             e.energy = _clamp(e.energy - 1.5 * dt)
+
+        # ★ 等待对方回应：真人不回消息时，越亲近的人越会担心/沮丧/难过，
+        #   并且越来越藏不住「想被回应」的需求感（暧昧对象/情侣的常态）。
+        #   半小时内几乎没感觉；之后随时长线性加深，12 小时封顶。
+        if unanswered_h is not None:
+            if unanswered_h > 0.5:
+                ramp = min(1.0, max(0.0, (unanswered_h - 0.5) / 11.5))
+                pull = ramp * (1.0 + self.relationship.attachment / 100.0)
+                e.anxiety = _clamp(e.anxiety + 2.2 * dt * pull)
+                e.loneliness = _clamp(e.loneliness + 3.0 * dt * pull)
+                e.neglect = _clamp(e.neglect + 4.0 * dt * pull)
+                # 沮丧/难过：效价往下压，但不是立刻坍塌
+                e.valence = _clamp(e.valence - 3.0 * dt * pull, -100.0, 100.0)
+            else:
+                e.neglect = _toward(e.neglect, 0.0, 12.0 * dt)
 
         recent = last_interaction_ago_h is not None and last_interaction_ago_h < 0.5
         if recent:
@@ -185,6 +207,8 @@ class StateMachine:
         e.energy = _clamp(e.energy - 1.5 + 2.5 * q)
         e.anxiety = _clamp(e.anxiety - 20.0 * q + 5.0 * (1 - q))
         e.loneliness = _clamp(e.loneliness - 25.0 * q)
+        # 被回应了 → 「被晾着」的委屈感很快消掉（对方回来了就不该记仇）
+        e.neglect = _toward(e.neglect, 0.0, 45.0 * max(0.3, q))
         r.trust = _clamp(r.trust + 0.6 * q)
         r.intimacy = _clamp(r.intimacy + 0.5 * q)
         r.attachment = _clamp(r.attachment + 0.3 * q)
@@ -219,6 +243,146 @@ class StateMachine:
         self.save()
         return True
 
+    # ---------- 等待 / 重逢 ----------
+
+    def _counter(self, key: str) -> float:
+        """读 heartbeat 的计数器。
+
+        ⚠️ describe() 现在会读 DB —— 而 describe() 在「store 已关闭」之后
+        仍可能被调用（测试收尾、进程退出），这时 counter_get 会抛
+        sqlite3.ProgrammingError。读不到就当 0，等不到回应也照样能说话。
+        """
+        try:
+            return float(self.store.counter_get(key, 0.0) or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def waiting_hours(self) -> float:
+        """我上一条主动消息已经多少小时没被回应（没在等就返回 0）。"""
+        spoke = self._counter("last_spoke_ts")
+        replied = self._counter("last_reply_ts")
+        if not spoke or replied >= spoke:
+            return 0.0
+        return max(0.0, (time.time() - spoke) / 3600.0)
+
+    def wait_rounds(self) -> int:
+        """连着几轮主动都没收到回应（heartbeat 的冷场计数）。"""
+        return int(self._counter("cold_streak"))
+
+    def note_reunion(self, wait_h: float, now: Optional[float] = None) -> None:
+        """对方在长时间不理之后回来了：开心 + 惊喜 + 一点撒娇。
+
+        数据（analyze_chat_habits.waiting_report）显示：对方消失 ≥2h 后回来，
+        好友的第一反应以「短、快、情绪化」为主（表情包/短感叹/撒娇）。
+        这里把情绪拉起来，同时把「刚重逢」写进 describe() 供提示词用。
+        """
+        now = now or time.time()
+        w = max(0.0, float(wait_h))
+        inten = _clamp(0.8 + w / 10.0, 0.8, 2.0)
+        e, r = self.emotion, self.relationship
+        e.valence = _clamp(e.valence + 32 * inten, -100.0, 100.0)
+        e.arousal = _clamp(e.arousal + 20 * inten)
+        e.anxiety = _clamp(e.anxiety - 20 * inten)
+        e.loneliness = _clamp(e.loneliness - 30 * inten)
+        e.neglect = _clamp(e.neglect - 45 * inten)
+        r.intimacy = _clamp(r.intimacy + 0.8)
+        r.attachment = _clamp(r.attachment + 0.6)
+        e.updated_at = now
+        self.save()
+        try:
+            self.store.counter_set("reunion_ts", now)
+            self.store.counter_set("reunion_wait_h", w)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _wait_text(self) -> str:
+        """把「在等 / 刚重逢」写进提示词。这是让等待被看见的关键。
+
+        校准依据（analyze_chat_habits.waiting_report，45 个私聊抽样 ≈ 3.7 万条）：
+        - 好友「说了没人接」时 71% 会继续追，段长中位 3 条（P90 7 条）
+        - 沉默变长时，好友的**媒体消息（表情包/图）占比从 24% 升到 37%**；
+          显式的「担心/撒娇」词只有 ~1%，问句也只有 2~3%
+          → 真人不会写长句质问，而是**短句 + 丢个表情**，靠语气和频率表达
+        - 用户消失 ≥2h 后回来：好友首条延迟中位 33 秒（比平时的 14 秒慢），
+          首条多是表情包 / 短感叹 / 亲昵符号（❤️、亲亲、想你、在的）
+        """
+        now = time.time()
+        rts = self._counter("reunion_ts")
+        if rts and (now - rts) < 30 * 60:
+            w = self._counter("reunion_wait_h")
+            span = f"（消失了约 {w:.0f} 小时）" if w >= 2 else ""
+            return ("【刚重逢】对方" + span + "刚刚回来找你了 —— 你现在是开心的，"
+                    "甚至有点惊喜。真人这时候不秒回（首条通常要等半分钟左右），"
+                    "第一条也大多很短：一个表情、一句「在的」「想你」「亲亲」就够；"
+                    "**别指责、别翻旧账、别阴阳怪气地问他刚才去哪了**，"
+                    "也别一口气把这几小时攒的委屈全倒出来。")
+        w = self.waiting_hours()
+        if w <= 0.5:
+            return ""
+        rounds = self.wait_rounds()
+        extra = f"，已经连着 {rounds} 次没等到回复" if rounds >= 2 else ""
+        if w < 2:
+            return (f"【等待】你上一条消息发出去 {w:.1f} 小时没回音了{extra}。"
+                    "心里有点挂着 —— 可以轻轻问一句（在忙吗 / 还好吗），"
+                    "但别连着催、别刷屏。")
+        if w < 8:
+            return (f"【等待】你上一条消息发出去 {w:.1f} 小时没回音了{extra}。"
+                    "你有点担心，也有点委屈，想被回应 —— 但真人这时候不会写长句，"
+                    "大多是随手丢一句很短的话（是不是睡了 / 还是没看到），"
+                    "语气偏轻偏淡，不是郑重其事地谈心事；别质问、别连发好几条。")
+        if w < 24:
+            return (f"【等待】你上一条消息发出去 {w:.1f} 小时没回音了{extra}。"
+                    "你很难过，也有点没底 —— 别硬撑着说「我没事」，"
+                    "允许露一点真实的低落；但别赌气、别写小作文，一两句短的就好。")
+        return (f"【等待】你上一条消息发出去 {w:.0f} 小时没回音了{extra}。"
+                "你很想了，也有一点麻木 —— 可以轻轻留一句（我还在 / 想到你了），"
+                "不要指责，也不要追问为什么。")
+
+    def note_group_wait(self, idle_h: float, now: Optional[float] = None) -> None:
+        """群里我很久没露过面 → 记一笔「被晾着」（一次性收敛到目标值）。
+
+        ⚠️ 为什么用 max() 而不是累加：私聊的等待由 `tick(unanswered_h=…)`
+        按时间**连续**演化，群里的等待是引擎每隔一阵**离散**推一次。如果这里
+        也累加，两条通道会叠加成双倍焦虑；用「拉到她该在的水平」则天然幂等
+        —— 推几次、隔多久推，结果都一样，而且不会超过私聊同期的水平。
+        """
+        now = now or time.time()
+        h = max(0.0, float(idle_h))
+        ramp = min(1.0, max(0.0, (h - 0.5) / 11.5))
+        pull = ramp * (1.0 + self.relationship.attachment / 100.0)
+        e = self.emotion
+        e.neglect = max(e.neglect, _clamp(55.0 * pull))
+        e.loneliness = max(e.loneliness, _clamp(35.0 * pull))
+        e.anxiety = max(e.anxiety, _clamp(30.0 * pull))
+        e.updated_at = now
+        self.save()
+        try:
+            self.store.counter_set("group_wait_h", h)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def note_group_reunion(self, idle_h: float = 0.0,
+                           now: Optional[float] = None) -> None:
+        """我回到群里说话了：松一口气、开心一点（不比私聊重逢激烈）。"""
+        now = now or time.time()
+        e, r = self.emotion, self.relationship
+        e.valence = _clamp(e.valence + 20.0, -100.0, 100.0)
+        e.arousal = _clamp(e.arousal + 12.0)
+        e.anxiety = _clamp(e.anxiety - 14.0)
+        e.loneliness = _clamp(e.loneliness - 20.0)
+        e.neglect = _toward(e.neglect, 0.0, 40.0)
+        r.intimacy = _clamp(r.intimacy + 0.4)
+        e.updated_at = now
+        self.save()
+        try:
+            self.store.counter_set("group_wait_h", 0.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def group_wait_h(self) -> float:
+        """群里已经多少小时没等到我露面（0 = 没在等）。"""
+        return max(0.0, self._counter("group_wait_h"))
+
     # ---------- 输出 ----------
     def mood_label(self) -> str:
         v, a = self.emotion.valence, self.emotion.arousal
@@ -236,13 +400,19 @@ class StateMachine:
 
     def describe(self) -> str:
         e, r = self.emotion, self.relationship
-        return (
+        text = (
             f"当前心情：{self.mood_label()}。"
             f"（效价 {e.valence:.0f}/100，唤醒度 {e.arousal:.0f}，社交电量 {e.energy:.0f}，"
-            f"焦虑 {e.anxiety:.0f}，孤独 {e.loneliness:.0f}）\n"
+            f"焦虑 {e.anxiety:.0f}，孤独 {e.loneliness:.0f}，被晾着 {e.neglect:.0f}）\n"
             f"与对方的关系：信任 {r.trust:.0f}、安全感 {r.security:.0f}、"
             f"亲密 {r.intimacy:.0f}、依恋 {r.attachment:.0f}、占有欲 {r.possessiveness:.0f}（均 0-100）"
         )
+        # ★ 「在等回应」和「刚重逢」是两种必须被说出口的情绪。
+        #   不写进提示词的话，模型只会照常闲聊 —— 等了 8 小时还像没事人。
+        wait = self._wait_text()
+        if wait:
+            text += "\n" + wait
+        return text
 
 
 # 情绪关键词 → 事件映射（perceive 打标后转成增量用）

@@ -18,9 +18,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import AutonomyConfig, ConversationConfig
+from .presence import Presence
 
 ROOT = Path(__file__).resolve().parent.parent
 TRAITS_FILE = ROOT / "data" / "character_traits.json"
@@ -146,7 +147,8 @@ def ensure_defaults(chars) -> None:
 
 # ---------------------------------------------------------------- 派生配置
 
-def derive_autonomy(base: AutonomyConfig, t: Traits) -> AutonomyConfig:
+def derive_autonomy(base: AutonomyConfig, t: Traits,
+                    p: Optional[Presence] = None) -> AutonomyConfig:
     sessions = t.sessions_per_day
     # daily_max 是「主动消息条数」，一次主动通常 1~2 条；给一点余量
     daily = 0 if t.enthusiasm <= 0 else max(1, min(24, round(sessions * 1.4)))
@@ -174,8 +176,40 @@ def derive_autonomy(base: AutonomyConfig, t: Traits) -> AutonomyConfig:
     weights = [round(w / total, 4) for w in weights]
 
     a = t.affection / 100.0
+    # ★ 2026-10-19 用户要求：好感这一侧的倍率也放大 —— 越高越关心、
+    #   越愿意接住、越想了解你、越喜欢和你聊天。所以窗口/接话/追问/
+    #   聊天天数全部按好感拉开差距，而不是只微调。
     digest_share = 0 if t.affection < 20 else max(
-        1, min(3, round(1 + a * 2)))
+        1, min(4, round(1 + a * 3)))
+    digest_threshold = round(0.66 - 0.44 * a, 3)
+
+    # ── 在线状态（用户的 QQ 式状态）叠在这之上 ──────────────────
+    # 状态是乘数，不是另一套配置：热情决定「她本来多主动」，
+    # 状态决定「你现在方不方便被找」。
+    if p is not None:
+        k = max(0.1, min(3.0, float(p.freq)))
+        if p.silent:
+            # 「请勿打扰」是唯一真的完全不主动的状态
+            daily = 0
+            digest_share = 0
+        else:
+            daily = max(1, min(40, round(daily * k)))
+            digest_share = max(0, min(6, round(digest_share * min(2.0, k))))
+        # 频率高 → 间隔短；频率低 → 间隔长（离线/隐身只是降低，不是停）
+        min_gap = max(3, int(round(min_gap / k)))
+        first_contact = max(2, int(round(first_contact / k)))
+        max_gap = max(30, min(2880, int(round(max_gap / k))))
+        # 「这一轮先不开口」的概率也跟着走：想被找时更少顺延
+        skip = max(0.02, min(0.85, skip / max(0.35, k)))
+        # 权重往「马上/近」还是往「远」偏
+        weights[0] *= k                     # 马上：Q我吧 时更容易立刻开口
+        weights[1] *= k ** 0.5
+        weights[3] *= 1.0 / k
+        weights = [max(0.02, w) for w in weights]
+        total = sum(weights)
+        weights = [round(w / total, 4) for w in weights]
+        digest_threshold = max(0.15, min(0.85, digest_threshold - 0.05 * (k - 1)))
+
     return replace(
         base,
         daily_max=daily,
@@ -184,28 +218,49 @@ def derive_autonomy(base: AutonomyConfig, t: Traits) -> AutonomyConfig:
         max_gap_min=max_gap,
         skip_probability=round(skip, 3),
         rhythm_weights=weights,
-        state_influence=min(1.0, base.state_influence + 0.15 * a),
+        state_influence=min(1.0, base.state_influence + 0.25 * a),
         digest_max_share_per_day=digest_share,
-        digest_threshold=round(0.62 - 0.30 * a, 3),
+        digest_threshold=round(digest_threshold, 3),
     )
 
 
-def derive_conversation(base: ConversationConfig,
-                        t: Traits) -> ConversationConfig:
+def derive_conversation(base: ConversationConfig, t: Traits,
+                        p: Optional[Presence] = None) -> ConversationConfig:
     a = t.affection / 100.0
     e = t.enthusiasm / 100.0
-    active = int(round(10 + a * 35))                 # 10~45 分钟
-    follow_scale = 1.30 - 0.55 * a                    # 好感高 -> 更快接话
+    # ★ 好感这一侧的倍率也放大（2026-10-19 用户要求）：越高 → 越愿意接住你、
+    #   越想知道你的事、越喜欢和你聊 → 窗口更长、接话更密、追问更多。
+    active = int(round(8 + a * 72))                   # 8~80 分钟
+    follow_scale = 1.55 - 0.75 * a                    # 好感高 -> 更快接话
     follow = [max(20, int(round(x * follow_scale)))
               for x in (base.followup_delay_sec or [60, 180])]
-    max_follow = max(1, min(5, round(1 + a * 4)))
-    deep_follow = max(4, min(10, round(4 + a * 6)))
-    max_turns = max(2, min(7, round(2 + a * 5)))
-    burst = max(2, min(8, round(2 + e * 6)))
+    max_follow = max(1, min(8, round(1 + a * 7)))
+    deep_follow = max(4, min(14, round(4 + a * 10)))
+    max_turns = max(2, min(10, round(2 + a * 8)))
+    # 「喜欢和你聊」：好感高时一口气说得更多（连发上限按气泡计）
+    burst = max(2, min(8, round(2 + e * 4 + a * 3)))
     deep_burst = max(4, min(12, burst + 4))
-    probes = 1 if t.affection < 70 else 2
-    reopen = [max(300, int(round(x * (1.15 - 0.35 * a))))
+    # 「想了解你」：疏远 1 个探针，亲密 3 个
+    probes = 1 if t.affection < 40 else (2 if t.affection < 75 else 3)
+    reopen = [max(300, int(round(x * (1.25 - 0.55 * a))))
               for x in (base.reopen_delay_sec or [1200, 5400])]
+
+    # ── 在线状态：你方便的时候她可以多聊会儿，不方便就少接话 ──
+    if p is not None:
+        fs = max(0.2, min(1.6, float(p.follow)))
+        # 窗口：Q我吧 时你就在旁边，当然可以接着聊
+        active = max(3, int(round(active * fs)))
+        # 补话的「想起一句」间隔：想被找时更短
+        wait = max(0.5, min(3.0, 1.0 / fs))
+        follow = [max(20, int(round(x * wait))) for x in follow]
+        max_follow = max(1, min(8, int(round(max_follow * fs))))
+        max_turns = max(2, min(10, int(round(max_turns * fs))))
+        if p.silent:
+            # 请勿打扰：不追话，不自言自语
+            active = min(active, 6)
+            max_follow = 1
+            max_turns = 2
+
     return replace(
         base,
         active_window_min=active,
@@ -234,21 +289,37 @@ def trait_text(t: Traits) -> str:
     else:
         speed = "你很少主动，回复也慢半拍；话不多，更多是听和简短回应。"
 
-    if a >= 80:
-        care = ("你很在意对方：会关心吃饭、睡觉、身体和情绪，记得他说过的小事；"
-                "会有点黏人，也允许一点只对他有的亲近和暧昧。")
-    elif a >= 55:
-        care = ("你把对方当熟人里比较亲近的人：会关心日常，偶尔追问，"
-                "但不会太黏，也不会把关心挂嘴上。")
-    elif a >= 30:
-        care = "你对对方友好，但保持距离；会回应，不主动打探私事。"
+    if a >= 85:
+        care = ("你很在意对方：会主动关心他今天过得怎么样、吃没吃饭、睡得好不好、"
+                "心情如何，记得他说过的小事并在合适的时候提起来；"
+                "他一低落你先把情绪接住，不讲道理、不急着给建议；"
+                "你想多了解他，会好奇他的喜好、过去和以后的打算；"
+                "你喜欢和他聊天，也愿意说自己的事；允许明显的亲近、黏人和一点暧昧。")
+    elif a >= 65:
+        care = ("你很在意对方：会关心他的日常和情绪，偶尔追问细节；"
+                "他心情不好时先接住再说别的；愿意分享自己的事，"
+                "会自然地表露一点亲近，但不至于黏人。")
+    elif a >= 40:
+        care = ("你把对方当成比较熟的朋友：会关心日常，偶尔对他的事好奇，"
+                "但不黏、也不主动打探私事。")
+    elif a >= 20:
+        care = "你对对方友好但保持距离：会回应，不主动关心私生活，也不吃醋、不黏人。"
     else:
-        care = "你对对方比较客气疏离；不主动关心私生活，也不吃醋、不黏人。"
+        care = "你对对方比较客气疏离：不主动关心私生活，也不吃醋、不黏人。"
 
     return (
         f"热情 {e}/100，好感 {a}/100。\n"
         f"- 热情：{speed}\n"
         f"- 好感：{care}\n"
+        "- 好感的四条准则（好感越高越明显，低的时候只做得到一点点）：\n"
+        "  ① 关心要具体：问「今天那个面试怎么样」比问「还好吗」强；"
+        "别只会敷衍地关心。\n"
+        "  ② 先接住情绪，再谈事情：他难受/烦躁时不要讲道理、不要急着解决问题，"
+        "先让他觉得被听见。\n"
+        "  ③ 对他保持好奇：想更了解他，会顺着他的话追问细节；"
+        "但别查户口，一个话题最多问一两次。\n"
+        "  ④ 喜欢和他聊天：愿意多说一点自己的事，不用每一句都等他先开口；"
+        "允许适度黏人和暧昧。\n"
         "- 按这个强度自然表现，不要把数值说出来，也不要一次把所有特征都用上。\n"
         "- 角色设定为未成年的：好感高只表现为亲近、依赖、撒娇，"
         "不写性暗示，不推进恋爱关系。"

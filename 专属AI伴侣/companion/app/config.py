@@ -254,6 +254,92 @@ class AutonomyConfig:
 
 
 @dataclass
+class GroupConfig:
+    """群聊引擎。**核心目标：让群像有人的群，但绝不让 AI 之间无限互相接话。**
+
+    群聊是跨角色对话 —— 10 个角色同一个模型、同一套口癖，如果不设硬上限，
+    必然演变成「两个人互相接梗刷屏」。所以这里的参数分四类：
+    防循环链、频率预算、单次发言规模、以及转发/吃醋的节流。
+    """
+    enabled: bool = True
+
+    # ── 防 AI-AI 无限循环（最重要的一组）──────────────────────
+    # ★ 2026-10-19 上调：实测真群里一条消息之后 60 秒内平均 2.59 个不同的人
+    #   开口、我发言后 10 分钟内平均 7.8 人接话。原来的 3/6 会在**我这一轮
+    #   回应中途**就触发冷却，日志里能看到「本轮说满 → 冷却 15 分钟」紧跟着
+    #   「橘雪莉 不开口：上一轮说满了」——挑了 5 个人只说出 3 个，剩下被静默
+    #   丢弃。放宽到 5/8 既容得下一轮完整回应，又仍然封住 AI 互相刷屏。
+    ai_chain_max: int = 5            # 距我上条消息以来，连续非我发言 ≤ 这个数
+    ai_no_owner_max: int = 8         # 一轮里的总发言上限（含我自己）
+    chain_cooldown_min: int = 15     # 触顶后冷却；期间只有我发言能重开
+    round_gap_reset_min: int = 6     # 静默这么久 → 算新的一轮，预算重置
+
+    # ── 频率预算（与私聊配额完全隔离，计数带 g: 前缀存在群库）──
+    msgs_per_hour: int = 18
+    msgs_per_hour_burst: int = 5
+    daily_max_total: int = 120
+    daily_max_per_member: int = 10
+    # ★ 90 秒太长：实测同一个人 30.8% 的发言是**紧接着自己上一条**补一句
+    #   （间隔 0 条别人的消息 → 秒级），相邻全体消息中位间隔只有 9 秒。
+    #   90 秒会把「我刚说完想再补一句」直接掐死，也让群里变成严格轮播。
+    min_gap_member_sec: int = 20
+
+    # ── 单次发言规模 ─────────────────────────────────────────
+    # ★ 2026-10-19 按真实群聊数据校准（1366 人群 / 57 万条样本）：
+    #   相邻两条消息里 69% 是换人说的，同一人的「一口气」中位 **1** 条、
+    #   P75 2 条（单条占 70%）—— 真人在群里几乎不连发，所以一次最多 2 条。
+    bubbles_per_turn: int = 2
+    bubbles_when_mentioned: int = 3
+    # 我发言时挑几个人回。真群里「我发言后 10 分钟内平均 7.8 个不同的人接话」，
+    # 但那是千人散去中心；小群取 4 —— 关键是这些人**并发开口**而不是排队。
+    responders: int = 4
+    responders_all_mention: int = 5  # @全体时最多几个
+    # ★ 每个回应者**各自的**开口延迟（秒），不再串行排队。
+    #   实测换人接话的间隔：34% 在 5 秒内、60% 在 15 秒内。
+    responder_gap_sec: List[int] = field(default_factory=lambda: [2, 18])
+
+    # ── 环境自发话题（群里自己聊起来）────────────────────────
+    ambient_enabled: bool = True
+    ambient_gap_min: List[int] = field(default_factory=lambda: [8, 25])
+    # 有人说完话之后，让另一个人过一小会儿接一句（否则群里「A 说完没人理，
+    # 等我开口才有人接 A」——用户实测反馈）。仍受链长/预算/复读拦截约束。
+    # ★ 实测「一条消息之后 60 秒内 88% 会有人接」→ 概率拉到 0.8。
+    chain_reply_probability: float = 0.80
+    chain_reply_gap_sec: List[int] = field(default_factory=lambda: [10, 50])
+
+    # ── 跨角色复读拦截 ───────────────────────────────────────
+    dedupe_window: int = 15          # 与最近 N 条群消息比对
+    dedupe_overlap: float = 0.5      # 4-gram 重合超过这个 → 丢弃并换人
+
+    # ── 全员禁言解除后的补话 ─────────────────────────────────
+    backlog_responders: int = 5
+    backlog_span_sec: List[int] = field(default_factory=lambda: [20, 90])
+
+    # ── 私聊转发 / 争宠 ──────────────────────────────────────
+    share_probability: float = 0.25
+    share_daily_max: int = 1
+    jealousy_cooldown_min: int = 30
+    jealousy_min_affection: int = 50
+
+    # ── 群里「抖私聊」/「私聊讲群里的动静」──────────────────
+    # 用户要的：好友在群里转发/分享我和她的私聊内容；
+    # 也会把群里好玩的事单独私聊讲给我听。两者都走群自己的节奏，
+    # 各带自己的每日上限，避免变成刷屏。
+    ambient_share_probability: float = 0.30   # 自发节奏里改走「抖私聊」的概率
+    dm_share_probability: float = 0.15        # 改走「私聊讲群里的动静」的概率
+    dm_share_daily_max: int = 1               # 每人每天最多私聊分享几次
+
+    # ── 建群 / 入群 ──────────────────────────────────────────
+    max_members: int = 20
+    join_request_cooldown_h: int = 24
+
+    # ── 落盘位置（和 memory.* 一样走 cfg.resolve，测试才能改到临时目录）──
+    # 不配置的话测试会往用户真实的 data/ 里灌群数据。
+    index_path: str = "./data/groups.json"
+    dir_path: str = "./data/groups"
+
+
+@dataclass
 class MemoryConfig:
     db_path: str = "./data/companion.db"
     sticker_dir: str = "./data/stickers"
@@ -289,6 +375,7 @@ class Config:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     sticker: StickerConfig = field(default_factory=StickerConfig)
     autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
+    group: GroupConfig = field(default_factory=GroupConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
@@ -464,6 +551,47 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         greet_delay_sec=int(_get(raw, "autonomy", "greet_delay_sec", default=20)),
         greet_wait_max_sec=int(_get(raw, "autonomy", "greet_wait_max_sec", default=3600)),
     )
+    cfg.group = GroupConfig(
+        enabled=bool(_get(raw, "group", "enabled", default=True)),
+        ai_chain_max=int(_get(raw, "group", "ai_chain_max", default=5)),
+        ai_no_owner_max=int(_get(raw, "group", "ai_no_owner_max", default=8)),
+        chain_cooldown_min=int(_get(raw, "group", "chain_cooldown_min", default=15)),
+        round_gap_reset_min=int(_get(raw, "group", "round_gap_reset_min", default=6)),
+        msgs_per_hour=int(_get(raw, "group", "msgs_per_hour", default=18)),
+        msgs_per_hour_burst=int(_get(raw, "group", "msgs_per_hour_burst", default=5)),
+        daily_max_total=int(_get(raw, "group", "daily_max_total", default=120)),
+        daily_max_per_member=int(_get(raw, "group", "daily_max_per_member", default=10)),
+        min_gap_member_sec=int(_get(raw, "group", "min_gap_member_sec", default=20)),
+        bubbles_per_turn=int(_get(raw, "group", "bubbles_per_turn", default=2)),
+        bubbles_when_mentioned=int(_get(raw, "group", "bubbles_when_mentioned", default=3)),
+        responders=int(_get(raw, "group", "responders", default=4)),
+        responders_all_mention=int(_get(raw, "group", "responders_all_mention", default=5)),
+        responder_gap_sec=_get(raw, "group", "responder_gap_sec", default=[2, 18]),
+        ambient_enabled=bool(_get(raw, "group", "ambient_enabled", default=True)),
+        ambient_gap_min=_get(raw, "group", "ambient_gap_min", default=[8, 25]),
+        chain_reply_probability=float(
+            _get(raw, "group", "chain_reply_probability", default=0.80)),
+        chain_reply_gap_sec=_get(raw, "group", "chain_reply_gap_sec",
+                                 default=[10, 50]),
+        dedupe_window=int(_get(raw, "group", "dedupe_window", default=15)),
+        dedupe_overlap=float(_get(raw, "group", "dedupe_overlap", default=0.5)),
+        backlog_responders=int(_get(raw, "group", "backlog_responders", default=5)),
+        backlog_span_sec=_get(raw, "group", "backlog_span_sec", default=[20, 90]),
+        share_probability=float(_get(raw, "group", "share_probability", default=0.25)),
+        share_daily_max=int(_get(raw, "group", "share_daily_max", default=1)),
+        jealousy_cooldown_min=int(_get(raw, "group", "jealousy_cooldown_min", default=30)),
+        jealousy_min_affection=int(_get(raw, "group", "jealousy_min_affection", default=50)),
+        ambient_share_probability=float(
+            _get(raw, "group", "ambient_share_probability", default=0.30)),
+        dm_share_probability=float(
+            _get(raw, "group", "dm_share_probability", default=0.15)),
+        dm_share_daily_max=int(
+            _get(raw, "group", "dm_share_daily_max", default=1)),
+        max_members=int(_get(raw, "group", "max_members", default=20)),
+        join_request_cooldown_h=int(_get(raw, "group", "join_request_cooldown_h", default=24)),
+        index_path=str(_get(raw, "group", "index_path", default="./data/groups.json")),
+        dir_path=str(_get(raw, "group", "dir_path", default="./data/groups")),
+    )
     cfg.memory = MemoryConfig(
         db_path=_get(raw, "memory", "db_path", default="./data/companion.db"),
         sticker_dir=_get(raw, "memory", "sticker_dir", default="./data/stickers"),
@@ -484,9 +612,14 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
 
     if not cfg.llm.api_key:
         raise ValueError("config.yaml 里 llm.api_key 未填写。")
-    if cfg.llm.model != "deepseek-flash":
+    # 模型名提示：只有「官方 DeepSeek 直连」才必须叫 deepseek-flash；
+    # 走自建网关（OpenCode-Go-Proxy 等）时上游只认自己的小写 id，
+    # 这时候再念叨 deepseek-flash 只是噪音。
+    _official = "api.deepseek.com" in str(cfg.llm.base_url or "")
+    if _official and cfg.llm.model != "deepseek-flash":
         print(
-            f"[warn] llm.model = {cfg.llm.model!r}。当前官方推荐使用 'deepseek-flash'；"
-            "注意 deepseek-v4-pro 是纯文本模型，不支持识图。"
+            f"[warn] llm.model = {cfg.llm.model!r}。官方直连推荐 'deepseek-flash'。"
         )
+    if cfg.llm.model == "deepseek-v4-pro":
+        print("[warn] deepseek-v4-pro 是纯文本模型，不支持识图。")
     return cfg

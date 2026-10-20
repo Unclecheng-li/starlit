@@ -10,6 +10,10 @@
 # 每个角色的聊天库、记忆、情绪状态
 专属AI伴侣/companion/data/characters/
 
+# 群聊：群清单 + 每个群一个库
+专属AI伴侣/companion/data/groups/
+专属AI伴侣/companion/data/groups.json
+
 # 角色头像（第三方美术素材）
 专属AI伴侣/companion/data/avatars/
 专属AI伴侣/companion/data/character_avatars/
@@ -29,6 +33,12 @@
 # 由你自己的聊天记录 / 角色列表生成的统计与参数
 专属AI伴侣/companion/data/chat_frequency_stats.json
 专属AI伴侣/companion/data/character_traits.json
+
+# 网页设置面板里填的 LLM 配置（含 API Key）
+专属AI伴侣/companion/data/settings.json
+
+# 你的在线状态（在线/离线/隐身…）
+专属AI伴侣/companion/data/presence.json
 
 # ══════════════════════════════════════════════════════════════
 # 第三方 / 二进制 —— 不入库，按文档自行安装
