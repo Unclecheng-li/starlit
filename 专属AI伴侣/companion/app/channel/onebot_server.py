@@ -91,6 +91,9 @@ class OneBotServerChannel:
         traits_set=None,
         presence_get=None,
         presence_set=None,
+        moods_get=None,
+        bond_get=None,
+        bond_set=None,
         group_api=None,
     ):
         self.cfg = cfg                 # QQConfig（self_id=星野号 owner_id=用户号）
@@ -108,6 +111,11 @@ class OneBotServerChannel:
         self.traits_set = traits_set
         self.presence_get = presence_get
         self.presence_set = presence_set
+        # 每个角色的一眼情绪（聊天列表头像旁的心情点 / 聊天标题下的那句人话）
+        self.moods_get = moods_get
+        # 情侣 / 专属关系（全局单例）
+        self.bond_get = bond_get
+        self.bond_set = bond_set
         # 群聊接口（由 Companion 提供）：list/detail/create/kick/announce/
         # mute_all/rename/requests/... —— 见 Companion 里的「对外的群接口」
         self.group_api = group_api
@@ -201,6 +209,9 @@ class OneBotServerChannel:
         app.router.add_post("/api/character-traits", self._api_traits_post)
         app.router.add_get("/api/presence", self._api_presence_get)
         app.router.add_post("/api/presence", self._api_presence_post)
+        app.router.add_get("/api/moods", self._api_moods)
+        app.router.add_get("/api/bond", self._api_bond_get)
+        app.router.add_post("/api/bond", self._api_bond_post)
         # 群聊：建群 / 群详情（含成员与公告）/ 审批 / 管理
         app.router.add_get("/api/identity", self._api_identity)
         app.router.add_get("/api/groups", self._api_groups_list)
@@ -911,6 +922,10 @@ class OneBotServerChannel:
             "ts": float(event["time"]), "text": text,
             "group_id": gid,
         }
+        if not gid:
+            # 私聊随机 mid 重启后查不到 → 留快照供历史引用回查
+            self._remember_quote_snapshot(str(peer_int), mid,
+                                          self.scfg.owner_nickname, text, "user")
         self._trim_live_msgs()
         await self._emit_event(event)
 
@@ -1041,18 +1056,74 @@ class OneBotServerChannel:
                 tid = int(rid[1:])
             except ValueError:
                 tid = 0
-        if not tid:
-            return None
         store = self.store_for(peer_id) if self.store_for else self.store
+        if tid:
+            try:
+                turn = store.get_turn(tid) if store else None
+            except Exception:  # noqa: BLE001
+                turn = None
+            if turn:
+                role = str(turn.get("role") or "")
+                return {"message_id": rid,
+                        "name": self._peer_name(peer_id, role),
+                        "text": str(turn.get("text") or "")[:80].replace("\n", " ")}
+        # ③ 重启后的兜底：实时消息的随机 mid 已经不在 _live_msgs 里了，
+        #    但发消息时留过一份快照 —— 引用块仍然画得出来。
+        snap = self._quote_snapshot(store, rid)
+        if snap:
+            return {"message_id": rid,
+                    "name": str(snap.get("name") or ""),
+                    "text": str(snap.get("text") or "")[:80].replace("\n", " ")}
+        return None
+
+    @staticmethod
+    def _quote_key(mid: str) -> str:
+        return "qsnap:" + str(mid or "")
+
+    def _remember_quote_snapshot(self, peer_id: str, mid: str,
+                                 name: str, text: str, role: str) -> None:
+        """把「这条消息是什么」留一份快照，供重启后的私聊引用回查。
+
+        私聊实时消息用的是随机 mid，进程一重启就查不到了 —— 于是用户
+        之前发的引用回复在历史里变成「没有引用」。群聊有稳定的 g<id>，
+        不需要这套。
+        """
+        mid = str(mid or "")
+        if not mid:
+            return
+        store = self.store_for(peer_id) if self.store_for else self.store
+        if not store:
+            return
         try:
-            turn = store.get_turn(tid) if store else None
-        except Exception:  # noqa: BLE001
-            turn = None
-        if not turn:
+            store.kv_set(self._quote_key(mid), {
+                "name": str(name or ""), "text": str(text or "")[:200],
+                "role": str(role or ""), "peer_id": str(peer_id or ""),
+                "ts": time.time(),
+            })
+            idx = store.kv_get("qsnap:index", []) or []
+            if not isinstance(idx, list):
+                idx = []
+            idx = [m for m in idx if m != mid]
+            idx.append(mid)
+            if len(idx) > 300:
+                for old in idx[:-300]:
+                    store.kv_set(self._quote_key(old), "")
+                idx = idx[-300:]
+            store.kv_set("qsnap:index", idx)
+        except Exception as e:  # noqa: BLE001
+            print(f"[onebot-server] 引用快照写入失败：{e!r}")
+
+    def _quote_snapshot(self, store, mid: str) -> Optional[Dict[str, Any]]:
+        if not store or not mid:
             return None
-        role = str(turn.get("role") or "")
-        return {"message_id": rid, "name": self._peer_name(peer_id, role),
-                "text": str(turn.get("text") or "")[:80].replace("\n", " ")}
+        try:
+            raw = store.kv_get(self._quote_key(mid), "")
+            if not raw:
+                return None
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return data if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
 
     def _peer_name(self, peer_id: str, role: str) -> str:
         """私聊引用块里的显示名：我发的是我，角色发的是角色名。"""
@@ -1160,6 +1231,9 @@ class OneBotServerChannel:
             "ts": float(event["time"]), "text": raw_text,
             "group_id": gid,
         }
+        if not gid:
+            self._remember_quote_snapshot(str(sid), mid, name, raw_text,
+                                          "assistant")
         self._trim_live_msgs()
         if not self._clients:
             self._offline_queue.append(event)
@@ -1526,14 +1600,21 @@ class OneBotServerChannel:
 
         NapCat 返回格式：data.messages[]，字段 message_id / real_seq /
         time / sender / message（段数组）/ raw_message，按时间正序。
-        注意 transcript 只存了纯文本（图片以「[表情包]」等占位）——
-        历史里的图片暂时还原不出来，文字部分完整。
+        ★ 角色的表情包/图片存在 transcript.media 里，回放时按原段还原；
+        老数据没有 media 列，就只剩文字（那时的历史确实没存图）。
         """
         try:
             count = int(params.get("count") or 20)
         except (TypeError, ValueError):
             count = 20
         count = max(1, min(count, 100))
+        # 「加载更早」翻页：取比 before_ts 更早的一页。+2 秒宽限是因为
+        # 一轮回复拆成多条气泡时 time 会比 turn 的 ts 小几秒，严格 <
+        # 会把刚好压在边界上的那轮漏掉 —— 重复有前端 mid 去重兜底，漏没有。
+        try:
+            before_ts = float(params.get("before_ts") or 0)
+        except (TypeError, ValueError):
+            before_ts = 0.0
         peer_id = str(params.get("user_id") or self.cfg.self_id or "")
         store = self.store_for(peer_id) if self.store_for else self.store
         if not store:
@@ -1541,7 +1622,14 @@ class OneBotServerChannel:
         char = self.characters.get(peer_id) if self.characters else None
         peer_int = int(char.id) if char else int(self.cfg.self_id or 0)
         peer_name = char.name if char else self.scfg.bot_nickname
-        turns = store.recent_turns(max(count, 20) * 2)
+        limit = max(count, 20) * 2
+        if before_ts > 0:
+            turns = store.turns_before(before_ts + 2, limit)
+        else:
+            turns = store.recent_turns(limit)
+        # 没取满 = 数据库里就这么多了 → 前端可以把「加载更早」收起来。
+        # 取满不等于「一定还有」，但下次翻页返回空会再兜一次底。
+        has_more = len(turns) >= limit
         # 只回放私聊（当前也只有私聊），倒着数 count 条再正序
         picked = turns[-count:] if len(turns) > count else turns
         messages = []
@@ -1550,11 +1638,22 @@ class OneBotServerChannel:
             role = t.get("role") or "user"
             is_user = role == "user"
             text = str(t.get("text") or "")
+            # ★ 表情包/图片：存在 media 列里（JSON 段数组）。没有这列的老数据
+            #   就只剩文字 —— 这是老数据本身的限制，新消息开始都会存。
+            media: List[Dict[str, Any]] = []
+            try:
+                raw_media = t.get("media")
+                if raw_media:
+                    parsed = json.loads(raw_media) if isinstance(raw_media, str) else raw_media
+                    if isinstance(parsed, list):
+                        media = [m for m in parsed if isinstance(m, dict)]
+            except (json.JSONDecodeError, TypeError):
+                media = []
             # ★ assistant 的一轮回复在 transcript 里是「多条气泡用 \n 拼起来」
             #   的。历史里必须拆回多条，否则网页端会先看到分开发的气泡，
             #   重连后又多出一条合并版（实测事故）。
             parts = [text] if is_user else [p for p in text.split("\n") if p.strip()]
-            if not parts:
+            if not parts and not media:
                 parts = [text]
             base_ts = int(float(t.get("ts") or time.time()))
             n = len(parts)
@@ -1590,7 +1689,28 @@ class OneBotServerChannel:
                     if q:
                         item["reply"] = q
                 messages.append(item)
-        return {"messages": messages, "result": None, "echo": None}
+            # ★ 表情包/图片单独成条（发送时就是一张一条），排在文字气泡之后
+            for mi, seg in enumerate(media):
+                mid = f"h{tid}-s{mi + 1}" if tid else str(next(self._msg_ids))
+                data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+                summary = str(data.get("summary") or "[表情包]")
+                messages.append({
+                    "message_id": mid,
+                    "real_seq": next(seq),
+                    "target_id": peer_int,
+                    "message_type": "private",
+                    "post_type": "message",
+                    "time": base_ts,
+                    "sender": {
+                        "user_id": int(self.cfg.owner_id if is_user else peer_int),
+                        "nickname": (self.scfg.owner_nickname if is_user
+                                     else peer_name),
+                    },
+                    "message": [seg],
+                    "raw_message": summary,
+                })
+        return {"messages": messages, "has_more": has_more,
+                "result": None, "echo": None}
 
     async def api_get_group_msg_history(
             self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1600,13 +1720,22 @@ class OneBotServerChannel:
         except (TypeError, ValueError):
             count = 40
         count = max(1, min(count, 200))
+        # 「加载更早」翻页，+2 秒宽限同私聊（重复有前端去重兜底，漏没有）
+        try:
+            before_ts = float(params.get("before_ts") or 0)
+        except (TypeError, ValueError):
+            before_ts = 0.0
         gid = str(params.get("group_id") or "")
         api = self.group_api
         if not api or not self._has_group(gid):
             return {"messages": []}
+        has_more = False
         try:
-            rows = [r for r in api.group_messages(gid, count)
-                    if not int(r.get("revoked") or 0)]
+            raw_rows = api.group_messages(
+                gid, count, before_ts=before_ts + 2 if before_ts > 0 else 0.0)
+            # 没取满 = 到底了（撤回过滤放后面，按过滤前的数量判断）
+            has_more = len(raw_rows) >= count
+            rows = [r for r in raw_rows if not int(r.get("revoked") or 0)]
             levels = {str(m["user_id"]): int(m.get("level") or 1)
                       for m in api.group_detail(gid).get("members", [])}
         except Exception as e:  # noqa: BLE001
@@ -1675,7 +1804,8 @@ class OneBotServerChannel:
             if q:
                 item["reply"] = q
             messages.append(item)
-        return {"messages": messages, "result": None, "echo": None}
+        return {"messages": messages, "has_more": has_more,
+                "result": None, "echo": None}
 
     # ---------------- 群管理类 API ----------------
 
@@ -2471,6 +2601,54 @@ class OneBotServerChannel:
             if inspect.isawaitable(data):
                 data = await data
             return web.json_response({"ok": True, **(data or {})})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_moods(self, request: web.Request) -> web.Response:
+        """所有角色的一眼情绪：{"items": {角色id: {level,word,line,...}}}。"""
+        if not self.moods_get:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            data = self.moods_get()
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})},
+                                     headers={"Cache-Control": "no-store"})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_bond_get(self, request: web.Request) -> web.Response:
+        if not self.bond_get:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            data = self.bond_get()
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})},
+                                     headers={"Cache-Control": "no-store"})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def _api_bond_post(self, request: web.Request) -> web.Response:
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "bad access_token"},
+                                     status=403)
+        if not self.bond_set:
+            return web.json_response({"ok": False, "error": "not supported"},
+                                     status=404)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "bad json"},
+                                     status=400)
+        try:
+            data = self.bond_set(body if isinstance(body, dict) else {})
+            if inspect.isawaitable(data):
+                data = await data
+            return web.json_response({"ok": True, **(data or {})},
+                                     headers={"Cache-Control": "no-store"})
         except Exception as e:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(e)}, status=400)
 

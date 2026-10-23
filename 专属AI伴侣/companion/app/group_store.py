@@ -129,6 +129,15 @@ class GroupStore(Store):
             rows = self.conn.execute(sql, (int(limit),)).fetchall()
         return [self._row_to_msg(r) for r in reversed(rows)]
 
+    def gmsgs_before(self, before_ts: float, limit: int = 40) -> List[Dict[str, Any]]:
+        """比 before_ts 更早的最近 limit 条未撤回消息（「加载更早」翻页用）。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM gmsg WHERE ts<? AND revoked=0 "
+                "ORDER BY id DESC LIMIT ?",
+                (float(before_ts), int(limit))).fetchall()
+        return [self._row_to_msg(r) for r in reversed(rows)]
+
     def msgs_since(self, after_id: int, limit: int = 200) -> List[Dict[str, Any]]:
         """取 id 大于游标的消息（禁言 backlog 用）。"""
         with self._lock:

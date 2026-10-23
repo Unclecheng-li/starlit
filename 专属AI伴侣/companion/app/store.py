@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS transcript (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     role TEXT NOT NULL,
-    text TEXT NOT NULL
+    text TEXT NOT NULL,
+    reply_mid TEXT DEFAULT '',
+    media TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS counters (
@@ -79,6 +81,12 @@ class Store:
                 if "reply_mid" not in cols:
                     self.conn.execute(
                         "ALTER TABLE transcript ADD COLUMN reply_mid TEXT")
+                # ★ 图片 / 表情包：以前 transcript 只存文字，历史回放里
+                #   角色发过的表情包全没了。media 列存当时的段（JSON），
+                #   回放时原样还原。
+                if "media" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE transcript ADD COLUMN media TEXT")
             except sqlite3.Error:
                 pass
             self.conn.commit()
@@ -206,11 +214,14 @@ class Store:
 
     # ---------- transcript ----------
     def add_turn(self, role: str, text: str, ts: Optional[float] = None,
-                 reply_mid: str = "") -> int:
+                 reply_mid: str = "",
+                 media: Optional[List[Dict[str, Any]]] = None) -> int:
         cur = self._exec(
-            "INSERT INTO transcript(ts,role,text,reply_mid) VALUES(?,?,?,?)",
+            "INSERT INTO transcript(ts,role,text,reply_mid,media)"
+            " VALUES(?,?,?,?,?)",
             (float(ts) if ts else time.time(), role, text,
-             str(reply_mid or "")),
+             str(reply_mid or ""),
+             json.dumps(media, ensure_ascii=False) if media else ""),
         )
         return int(cur.lastrowid or 0)
 
@@ -269,3 +280,18 @@ class Store:
                 "SELECT * FROM transcript ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    def turns_before(self, before_ts: float, limit: int = 20) -> List[Dict[str, Any]]:
+        """比 before_ts 更早的最近 limit 条（前端「加载更早」翻页用）。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM transcript WHERE ts<? ORDER BY id DESC LIMIT ?",
+                (float(before_ts), int(limit))).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def first_turn_ts(self) -> float:
+        """这段关系里最早的一句话（用来算认识天数）。没有记录返回 0。"""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT MIN(ts) AS t FROM transcript").fetchone()
+        return float(row["t"] or 0) if row else 0.0

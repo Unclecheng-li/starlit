@@ -144,6 +144,8 @@ class GuestRuntime:
             return "" if name == "world.md" else self.cfg.read_persona(name)
 
         self.load_persona = _load
+        # ★ 情侣 / 专属关系那一段（由 Companion 在启动和绑定时注入）
+        self.bond_line = ""
         self.suppressor = Suppressor(self.autonomy_cfg, self.store, llm,
                                      self.state, self.memory)
         self.digest = Digest(self.autonomy_cfg, cfg.memory, llm, self.memory,
@@ -152,7 +154,7 @@ class GuestRuntime:
             self.autonomy_cfg, cfg.qq, self.store, llm, self.state, self.memory,
             self.suppressor, sender, self.digest, self.load_persona,
             sender_id=char.id, sender_name=char.name,
-            trait_text=trait_text(self.traits),
+            trait_text=trait_text(self.traits, self.bond_line),
             delay_scale=self.traits.delay_scale,
             presence_text=self.presence_text,
             schedule=char.schedule,
@@ -161,7 +163,7 @@ class GuestRuntime:
             self.conv_cfg, cfg.behavior, cfg.qq, self.store, llm,
             self.state, self.memory, sender, self.suppressor, self.load_persona,
             sender_id=char.id, sender_name=char.name,
-            trait_text=trait_text(self.traits),
+            trait_text=trait_text(self.traits, self.bond_line),
             delay_scale=self.traits.delay_scale,
             presence_text=self.presence_text,
         )
@@ -169,6 +171,36 @@ class GuestRuntime:
         self._hb_task = None
         self._conv_task = None
         self._started = False
+
+    def relation_text(self) -> str:
+        """热情/好感 + 情侣或朋友身份。"""
+        return trait_text(self.traits, self.bond_line)
+
+    def _sticker_media(self, files) -> list:
+        """把刚发出的表情包转成可回放的段（存进 transcript.media）。"""
+        out = []
+        ch = getattr(self.sender, "channel", None)
+        for f in files or []:
+            try:
+                uri = ch.file_uri(f) if ch and hasattr(ch, "file_uri") else ""
+            except Exception:  # noqa: BLE001
+                uri = ""
+            if not uri:
+                continue
+            out.append({"type": "image",
+                        "data": {"file": uri, "summary": "[表情包]",
+                                 "sub_type": 1}})
+        return out
+
+    def set_bond_line(self, line: str) -> None:
+        """绑定 / 解绑后刷新身份说明（不重启也要立刻生效）。"""
+        self.bond_line = str(line or "")
+        rel = self.relation_text()
+        try:
+            self.heartbeat.trait_text = rel
+            self.conversation.trait_text = rel
+        except AttributeError:
+            pass
 
     def _derived_autonomy(self, t):
         auto = derive_autonomy(self.base_autonomy, t, self.presence)
@@ -205,9 +237,9 @@ class GuestRuntime:
         self.suppressor.cfg = auto
         self.digest.cfg = auto
         self.conversation.cfg = conv
-        self.heartbeat.trait_text = trait_text(t)
+        self.heartbeat.trait_text = self.relation_text()
         self.heartbeat.delay_scale = t.delay_scale
-        self.conversation.trait_text = trait_text(t)
+        self.conversation.trait_text = self.relation_text()
         self.conversation.delay_scale = t.delay_scale
         self.heartbeat.presence_text = self.presence_text
         self.conversation.presence_text = self.presence_text
@@ -316,7 +348,7 @@ class GuestRuntime:
 
         user_text = text or ("（发来一个表情包）" if image_is_sticker
                              else ("（发来一张图片）" if image_desc else "（发来一张图）"))
-        relation = trait_text(self.traits)
+        relation = self.relation_text()
         analysis = await analyze(
             self.llm,
             user_text=user_text,
@@ -508,7 +540,8 @@ class GuestRuntime:
         )
         # 只有真的发出去才写进历史；被中止的草稿不能污染回放
         if sent:
-            self.store.add_turn("assistant", "\n".join(bubbles)[:800])
+            self.store.add_turn("assistant", "\n".join(bubbles)[:800],
+                                media=self._sticker_media(sticker_files))
             self.store.kv_set("last_was_sticker", bool(sticker_files))
             # 和星野一样：把这次发言计入接话额度，避免紧接着又追话
             self.conversation.on_bot_message(count_as_turn=True,

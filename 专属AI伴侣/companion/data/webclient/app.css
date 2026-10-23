@@ -637,6 +637,79 @@ html[data-theme="dark"] .list-pane { border-right-color: rgba(255, 255, 255, .06
 .avatar.me-avatar {
   background: linear-gradient(140deg, #6fc9ff, #5b8cff 58%, #9a6bff);
 }
+/* 一眼情绪：头像右下角的晴/阴/雨。悬停才显示她本人那句心里话。 */
+.mood-dot {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--panel);
+  z-index: 2;
+  pointer-events: auto;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06);
+}
+.mood-dot.sun { background: #f5b73d; }
+.mood-dot.cloud { background: #98a6b5; }
+.mood-dot.rain { background: #6d8fd8; }
+
+/* 情侣 / 专属关系 */
+.bond-mark {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #ff5f8f;
+  color: #fff;
+  font-style: normal;
+  font-size: 9px;
+  line-height: 15px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--panel);
+  z-index: 3;
+  pointer-events: none;
+}
+.bond-chip {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 16px;
+  color: #b3184f;
+  background: rgba(255, 95, 143, .14);
+  border: 1px solid rgba(255, 95, 143, .3);
+  white-space: nowrap;
+}
+body.dark .bond-chip, html[data-theme="dark"] .bond-chip {
+  color: #ff9dba;
+  background: rgba(255, 95, 143, .18);
+}
+/* 角色资料卡 */
+.profile-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.profile-avatar { width: 56px; height: 56px; font-size: 20px; }
+.profile-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.profile-meta strong { font-size: 15px; }
+.profile-meta span { font-size: 12px; opacity: .7; }
+.profile-stats {
+  font-size: 12px;
+  opacity: .75;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, .07);
+  margin-bottom: 12px;
+}
+.profile-bond { border-top: 1px solid rgba(127, 127, 127, .16); padding-top: 10px; }
+.profile-bond-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.profile-bond-actions { margin: 8px 0; }
+.btn-primary.danger { background: #e5484d; border-color: #e5484d; }
 
 .conv-main { flex: 1; min-width: 0; }
 .conv-top { display: flex; align-items: baseline; gap: 8px; }
@@ -848,6 +921,23 @@ html[data-theme="dark"] .chat-head { border-bottom-color: rgba(255, 255, 255, .0
   color: var(--text-3);
   background: rgba(130, 147, 170, .09);
   user-select: none;
+}
+
+/* 「加载更早」提示条：渲染窗口只画最近一屏，更早的折叠在这里 */
+.earlier-bar {
+  align-self: center;
+  margin: 6px 0 10px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--brand-deep);
+  background: var(--brand-soft);
+  cursor: pointer;
+  user-select: none;
+  transition: background .15s ease;
+}
+.earlier-bar:hover {
+  background: var(--brand-ring);
 }
 
 .msg-row {

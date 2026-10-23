@@ -1,4 +1,4 @@
-"""入口：装配所有模块，起 WS 服务 + 后台心跳。
+﻿"""入口：装配所有模块，起 WS 服务 + 后台心跳。
 
 运行：
     cd companion
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .act import Sender
+from . import bond as bond_mod
 from .autonomy.conversation import ConversationRunner, is_closing_text
 from .autonomy.digest import Digest
 from .autonomy.heartbeat import Heartbeat
@@ -47,10 +48,17 @@ from .store import Store
 from .think import (analyze, express, extract_overused_terms, format_recent,
                     format_time_context, judge_sticker)
 from .traits import (derive_autonomy, derive_conversation, ensure_defaults,
-                     get_traits, save_traits, trait_preview, trait_text,
-                     traits_payload)
+                     get_traits, romance_allowed, save_traits, trait_preview,
+                     trait_text, traits_payload)
 
 HIGH_RISK = {"自伤倾向", "极端情绪"}
+
+# 私聊里明确的「告白」句式。只认这些，不靠好感度猜 —— 猜错会变成
+# 「我随口说了句在一起吧，她怎么当真了」。
+_CONFESS_RE = re.compile(
+    r"(做我(的)?(女|男)朋友|当我(的)?(女|男)朋友|做我对象|"
+    r"(我们)?在一起吧|跟我在一起|和我交往|交往吧|处对象)"
+)
 
 # schtasks 等命令行工具的输出按控制台代码页编码（中文系统是 GBK）
 CONSOLE_ENC = "gbk" if os.name == "nt" else "utf-8"
@@ -132,6 +140,11 @@ class Companion:
         self._group_runtimes: Dict[str, GroupRuntime] = {}
         self._group_scout_task: Optional[asyncio.Task] = None
         self.store = Store(cfg.resolve(cfg.memory.db_path))
+        # ★ 情侣 / 专属关系：全局单例，和主库放在同一个 data 目录。
+        #   必须在装配角色之前读出来，否则第一次回复拿到的还是「无绑定」的提示词。
+        self.bond_path = (Path(cfg.resolve(cfg.memory.db_path)).parent
+                          / bond_mod.FILE_NAME)
+        self.bond = bond_mod.load(self.bond_path)
         self._ignored_count = 0
         self._ignored_last_log = 0.0
         # 多条消息合并（debounce）—— 见 _queue_for_merge
@@ -171,6 +184,9 @@ class Companion:
                 traits_set=self.set_character_traits,
                 presence_get=self.get_presence,
                 presence_set=self.set_presence,
+                moods_get=self.get_moods,
+                bond_get=self.get_bond,
+                bond_set=self.set_bond,
                 group_api=self,
             )
         else:
@@ -186,7 +202,7 @@ class Companion:
         self.heartbeat = Heartbeat(
             autonomy_cfg, cfg.qq, self.store, self.llm, self.state, self.memory,
             self.suppressor, self.sender, self.digest, cfg.read_persona,
-            trait_text=trait_text(self.primary_traits),
+            trait_text=self._primary_relation(),
             delay_scale=self.primary_traits.delay_scale,
             presence_text=self.presence_text,
             schedule=self.characters.primary.schedule,
@@ -194,12 +210,186 @@ class Companion:
         self.conversation = ConversationRunner(
             conv_cfg, cfg.behavior, cfg.qq, self.store, self.llm,
             self.state, self.memory, self.sender, self.suppressor, cfg.read_persona,
-            trait_text=trait_text(self.primary_traits),
+            trait_text=self._primary_relation(),
             delay_scale=self.primary_traits.delay_scale,
             presence_text=self.presence_text,
         )
 
     # ---------------- 多角色 ----------------
+
+    # ---------------- 情侣 / 专属关系 ----------------
+
+    def _bond_line(self, cid: str) -> str:
+        return bond_mod.line_for(self.bond, cid)
+
+    def _primary_relation(self) -> str:
+        return trait_text(self.primary_traits,
+                          self._bond_line(self.characters.primary.id))
+
+    def _refresh_relation_text(self) -> None:
+        """绑定 / 解绑后，让所有角色立刻知道新的关系身份。"""
+        rel = self._primary_relation()
+        try:
+            self.heartbeat.trait_text = rel
+            self.conversation.trait_text = rel
+        except AttributeError:
+            pass
+        for g in list(self._guests.values()):
+            g.set_bond_line(self._bond_line(g.char.id))
+
+    def _bond_eligibility(self, cid: str) -> dict:
+        cid = str(cid or "")
+        char = self.characters.get(cid)
+        if not char:
+            raise ValueError("没有这个角色")
+        if cid == self.characters.primary.id:
+            traits, state, store = (self.primary_traits, self.state, self.store)
+        else:
+            g = self._guests.get(cid) or self._guest_for(cid)
+            if not g:
+                raise ValueError("没有这个角色")
+            traits, state, store = (g.traits, g.state, g.store)
+        first = store.first_turn_ts()
+        days = max(0.0, (time.time() - first) / 86400.0) if first else 0.0
+        allowed = romance_allowed(cid)
+        ok, missing = bond_mod.eligibility(
+            affection=traits.affection,
+            intimacy=state.relationship.intimacy,
+            trust=state.relationship.trust,
+            known_days=days,
+            romance_allowed=allowed,
+        )
+        return {
+            "character_id": cid, "name": char.name,
+            "affection": traits.affection,
+            "intimacy": round(float(state.relationship.intimacy), 1),
+            "trust": round(float(state.relationship.trust), 1),
+            "days": round(days, 1),
+            "romance_allowed": allowed,
+            "eligible": ok, "missing": missing,
+        }
+
+    def get_bond(self) -> dict:
+        items = [self._bond_eligibility(c.id)
+                 for c in self.characters.all()]
+        return {"bond": bond_mod.snapshot(self.bond), "candidates": items}
+
+    def set_bond(self, body: dict) -> dict:
+        body = body if isinstance(body, dict) else {}
+        action = str(body.get("action") or "bind").strip().lower()
+        now = time.time()
+        if action == "unbind":
+            if not self.bond.active:
+                raise ValueError("现在没有绑定任何人")
+            cid = str(self.bond.character_id)
+            name = self.bond.name
+            self.bond.ex_id = cid
+            self.bond.ex_name = name
+            self.bond.breakup_ts = now
+            self.bond.cooldown_until = now + bond_mod.COOLDOWN_HOURS * 3600
+            self.bond.character_id = ""
+            self.bond.name = ""
+            self.bond.type = "partner"
+            self.bond.since = 0.0
+            bond_mod.save(self.bond_path, self.bond)
+            self._refresh_relation_text()
+            # 真实的情绪后果：不是「删一条配置」，是真的难受一阵
+            got = self._bound_state_for(cid)
+            if got:
+                st, store = got
+                st.apply_event("conflict", 1.0)
+                st.emotion.valence = max(-100.0, st.emotion.valence - 15.0)
+                st.relationship.security = max(
+                    0.0, st.relationship.security - 15.0)
+                st.relationship.attachment = max(
+                    0.0, st.relationship.attachment - 10.0)
+                st.save()
+                try:
+                    store.add_event("[关系] 和老师解除了恋人关系", kind="bond")
+                except Exception:  # noqa: BLE001
+                    pass
+            print(f"[bond] 解除与 {name} 的恋人关系（冷静期 "
+                  f"{bond_mod.COOLDOWN_HOURS} 小时）")
+            return self.get_bond()
+
+        cid = str(body.get("character_id") or "").strip()
+        if not cid:
+            raise ValueError("缺少 character_id")
+        if self.bond.active:
+            raise ValueError(f"已经和「{self.bond.name}」绑定了，先解除再换")
+        if self.bond.cooldown_until > now:
+            left = (self.bond.cooldown_until - now) / 3600.0
+            raise ValueError(f"刚分手，还要再等 {left:.0f} 小时")
+        info = self._bond_eligibility(cid)
+        if not info.get("romance_allowed", True):
+            raise ValueError("这个角色的设定不进入恋爱关系")
+        force = bool(body.get("force"))
+        if not info["eligible"] and not force:
+            raise ValueError("还差一点：" + "、".join(info["missing"]))
+        char = self.characters.get(cid)
+        self.bond.character_id = cid
+        self.bond.name = char.name
+        self.bond.type = "partner"
+        self.bond.since = now
+        self.bond.breakup_ts = 0.0
+        self.bond.cooldown_until = 0.0
+        bond_mod.save(self.bond_path, self.bond)
+        self._refresh_relation_text()
+        got = self._bound_state_for(cid)
+        if got:
+            st, store = got
+            st.apply_event("reunion", 1.0)
+            st.relationship.intimacy = min(
+                100.0, st.relationship.intimacy + 5.0)
+            st.save()
+            try:
+                store.add_event("[关系] 和老师确定了恋人关系", kind="bond")
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"[bond] 和 {char.name} 确定了恋人关系")
+        return self.get_bond()
+
+    def _bound_state_for(self, cid: str):
+        cid = str(cid or "")
+        if not cid:
+            return None
+        if cid == self.characters.primary.id:
+            return (self.state, self.store)
+        g = self._guests.get(cid) or self._guest_for(cid)
+        if not g:
+            return None
+        return (g.state, g.store)
+
+    def _maybe_confess(self, msg, text: str) -> None:
+        """私聊里的明确告白：达标就直接确定关系，然后照常走回复管线。
+
+        不额外发一条「系统提示」—— 绑定后她的提示词已经变成恋人身份，
+        接下来那条回复自然会用恋人的方式接住这句告白。
+        """
+        if not msg.is_private or not text:
+            return
+        if self.bond.active:
+            return
+        if self.bond.cooldown_until > time.time():
+            return
+        if not _CONFESS_RE.search(text):
+            return
+        cid = str(getattr(msg, "peer_id", "") or "")
+        if not self.characters.get(cid):
+            return
+        try:
+            info = self._bond_eligibility(cid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[bond] 告白检查失败：{e!r}")
+            return
+        if not info["eligible"]:
+            print(f"[bond] {info['name']} 的告白还没到门槛："
+                  + "、".join(info["missing"]))
+            return
+        try:
+            self.set_bond({"action": "bind", "character_id": cid})
+        except Exception as e:  # noqa: BLE001
+            print(f"[bond] 告白绑定失败：{e!r}")
 
     def store_for(self, peer_id: str):
         """按会话角色取历史库；未知 id 落回主角色，避免接口报错。"""
@@ -221,6 +411,7 @@ class Companion:
                          stickers=self.stickers, search=self.search,
                          stealer=self.stealer,
                          group_context_getter=self._group_context_for)
+        g.set_bond_line(self._bond_line(cid))
         self._guests[cid] = g
         if getattr(self, "_started", False):
             g.start()
@@ -274,6 +465,22 @@ class Companion:
 
     # ---------------- 热情 / 好感 ----------------
 
+    def get_moods(self) -> dict:
+        """所有角色的一眼情绪（聊天列表的心情点 / 标题下那句人话）。"""
+        items: dict = {}
+        for char in self.characters.all():
+            try:
+                if char.is_primary:
+                    st = self.state
+                else:
+                    g = self._guests.get(char.id) or self._guest_for(char.id)
+                    st = getattr(g, "state", None) if g else None
+                if st is not None:
+                    items[str(char.id)] = st.mood_snapshot()
+            except Exception:  # noqa: BLE001
+                continue
+        return {"items": items}
+
     def get_character_traits(self, peer_id: str) -> dict:
         cid = str(peer_id or "").strip()
         char = self.characters.get(cid)
@@ -320,9 +527,9 @@ class Companion:
         self.suppressor.cfg = auto
         self.digest.cfg = auto
         self.conversation.cfg = conv
-        self.heartbeat.trait_text = trait_text(t)
+        self.heartbeat.trait_text = self._primary_relation()
         self.heartbeat.delay_scale = t.delay_scale
-        self.conversation.trait_text = trait_text(t)
+        self.conversation.trait_text = self._primary_relation()
         self.conversation.delay_scale = t.delay_scale
         self.presence_text = presence_text(p)
         self.heartbeat.presence_text = self.presence_text
@@ -624,12 +831,16 @@ class Companion:
         rt.apply_limits(values or {})
         return self.group_detail(gid)
 
-    def group_messages(self, gid: str, count: int = 40) -> List[dict]:
-        """群历史（给 channel 拼 OneBot 段用）。"""
+    def group_messages(self, gid: str, count: int = 40,
+                       before_ts: float = 0.0) -> List[dict]:
+        """群历史（给 channel 拼 OneBot 段用）。before_ts>0 时往前翻页。"""
         if not self.groups.exists(str(gid)):
             return []
         st = self.groups.store_for(gid)
-        return st.recent_gmsgs(max(1, min(200, int(count or 40))))
+        limit = max(1, min(200, int(count or 40)))
+        if before_ts:
+            return st.gmsgs_before(before_ts, limit)
+        return st.recent_gmsgs(limit)
 
     def create_group(self, name: str, member_ids: Optional[List[str]] = None) -> dict:
         owner_id = str(self.cfg.qq.owner_id or "")
@@ -1344,11 +1555,15 @@ class Companion:
         # 新增角色：各自独立的记忆与人设，只走轻量回复管线
         # （不接心跳/主动分享，避免十个角色同时找你）
         peer = str(getattr(msg, "peer_id", "") or "")
+        text = (msg.text or "").strip()
+        # ★ 私聊里的明确告白：在进入回复管线前绑定，这样她这条回复
+        #   就是「恋人」身份说出来的，而不是先拒绝再变卦。
+        if msg.is_private and text:
+            self._maybe_confess(msg, text)
         if msg.is_private and peer and self.characters.is_guest(peer):
             self._queue_guest(msg)
             return
 
-        text = msg.text.strip()
         if text and await self._handle_command(msg, text):
             return
 
@@ -1478,6 +1693,27 @@ class Companion:
         head.raw = {**(head.raw or {}), "_merged_count": len(batch),
                     "_merged_texts": store_texts, "_merged_times": store_times}
         return head
+
+    def _sticker_media(self, files: List[str]) -> List[dict]:
+        """把刚发出的表情包转成可回放的段（存进 transcript.media）。
+
+        以前只存文字，表情包发出去就没了 —— 重新打开会话时历史里
+        只剩那几句文字，图全消失。这里把通道的 HTTP 地址一并留下。
+        """
+        out: List[dict] = []
+        channel = getattr(self, "channel", None)
+        for f in files or []:
+            try:
+                uri = channel.file_uri(f) if channel and hasattr(
+                    channel, "file_uri") else ""
+            except Exception:  # noqa: BLE001
+                uri = ""
+            if not uri:
+                continue
+            out.append({"type": "image",
+                        "data": {"file": uri, "summary": "[表情包]",
+                                 "sub_type": 1}})
+        return out
 
     @staticmethod
     def _store_user_turns(store: Store, msg: IncomingMessage,
@@ -1878,7 +2114,7 @@ class Companion:
             self.state.apply_event(event, intensity=emotion["intensity"])
 
         # 3) 认知：分析通道
-        relation = trait_text(self.primary_traits)
+        relation = self._primary_relation()
         analysis = await analyze(
             self.llm,
             user_text=msg.text or ("（发来一个表情包）" if image_is_sticker
@@ -2103,7 +2339,8 @@ class Companion:
             print("[main] 本批回复被新消息中止，未发出任何内容")
             return
         self.store.kv_set("last_was_sticker", bool(sticker_files))
-        self.store.add_turn("assistant", reply_text[:400])
+        self.store.add_turn("assistant", reply_text[:400],
+                            media=self._sticker_media(sticker_files))
         # ★ 连发上限按气泡计：这条「回答」也占配额（发了 3 条就是 3，
         # 不是 1），确保一口气 5 气泡的长回复之后不再追话
         self.conversation.on_bot_message(count_as_turn=True, bubbles=max(1, sent))

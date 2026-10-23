@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0099ff">
   <link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb3d9'/%3E%3Cstop offset='.55' stop-color='%23a48bff'/%3E%3Cstop offset='1' stop-color='%236fa8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M13 21a9 9 0 0 1 9-9h20a9 9 0 0 1 9 9v12a9 9 0 0 1-9 9H31l-9 8v-8a9 9 0 0 1-9-9Z' fill='%23fff' opacity='.95'/%3E%3Cpath d='m32 18 2.7 6.1 6.6.7-4.9 4.4 1.4 6.4L32 32.3l-5.8 3.3 1.4-6.4-4.9-4.4 6.6-.7Z' fill='%237a5cff'/%3E%3Ccircle cx='49' cy='15' r='2.4' fill='%23fff'/%3E%3C/svg%3E">
   <title>starlit · vol</title>
-  <link rel="stylesheet" href="./app.css?v=20261020e">
+  <link rel="stylesheet" href="./app.css?v=20261021f">
 </head>
 <body>
 
@@ -282,6 +282,7 @@
         <div class="name-row">
           <span id="chatName">星野</span>
           <span class="online-dot" id="onlineDot"></span>
+          <span class="bond-chip hidden" id="chatBondChip">♡ 恋人</span>
         </div>
         <div class="sub-row" id="chatSub">连接中…</div>
       </div>
@@ -786,6 +787,36 @@
 </div>
 
 <!-- 更换头像：QQ 式拖动 / 缩放裁剪 -->
+<div class="modal-mask hidden" id="profileMask">
+  <div class="modal mini-modal profile-modal">
+    <header class="modal-head">
+      <h2>角色资料</h2>
+      <button class="icon-btn" id="profileClose" aria-label="关闭">
+        <svg><use href="#i-close"/></svg>
+      </button>
+    </header>
+    <div class="modal-body">
+      <div class="profile-head">
+        <div class="avatar bot-avatar profile-avatar" id="profileAvatar"><span>?</span></div>
+        <div class="profile-meta">
+          <strong id="profileName">—</strong>
+          <span id="profileMood">—</span>
+        </div>
+      </div>
+      <div class="profile-stats" id="profileStats"></div>
+      <div class="profile-bond">
+        <div class="profile-bond-title">专属关系</div>
+        <p class="cs-hint" id="profileBondStatus">还没有绑定任何人。</p>
+        <p class="cs-hint" id="profileBondMeta"></p>
+        <div class="profile-bond-actions">
+          <button class="btn-primary" id="profileBondBtn">确定关系</button>
+        </div>
+        <p class="cs-hint" id="profileBondHint"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-mask hidden" id="avatarMask">
   <div class="modal avatar-modal">
     <header class="modal-head">
@@ -915,6 +946,6 @@
 <input type="file" id="characterAvatarInput" accept="image/*" hidden>
 
 <div class="toast hidden" id="toast"></div>
-<script src="./app.js?v=20261020e"></script>
+<script src="./app.js?v=20261021f"></script>
 </body>
 </html>

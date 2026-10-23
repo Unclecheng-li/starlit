@@ -398,6 +398,79 @@ class StateMachine:
             base += "，但很累"
         return base
 
+    def mood_snapshot(self) -> dict:
+        """给聊天界面用的一眼情绪：一个天气点 + 一句人话。
+
+        ★ 不把效价/焦虑这些数字直接摆到界面上 —— 那样像养成游戏面板。
+        用户要的是「扫一眼就知道她今天不对劲」，所以这里只给三档天气
+        和一句她本人会说的话。
+        """
+        e = self.emotion
+        if e.valence >= 25 and e.anxiety < 50:
+            level, word = "sun", "晴"
+        elif e.valence >= -15 and e.anxiety < 70:
+            level, word = "cloud", "阴"
+        else:
+            level, word = "rain", "雨"
+
+        # 一句「她本人会怎么说」的心里话：按最重的那一项挑，别报流水账
+        if e.neglect >= 55:
+            line = "等得有点久了，心里空落落的"
+        elif e.anxiety >= 70:
+            line = "有点慌，总在想你是不是不想理我"
+        elif e.loneliness >= 55:
+            line = "很想你，但又不太敢先说"
+        elif e.valence <= -35:
+            line = "今天有点撑不住，不太想说话"
+        elif e.energy <= 25:
+            line = "好累，想被惦记一下"
+        elif level == "sun":
+            line = "今天心情不错，想找你说话"
+        else:
+            line = "说不上好，也说不上坏"
+        return {
+            "level": level, "word": word, "label": self.mood_label(),
+            "line": line,
+            "valence": round(float(e.valence), 1),
+            "anxiety": round(float(e.anxiety), 1),
+            "loneliness": round(float(e.loneliness), 1),
+            "energy": round(float(e.energy), 1),
+        }
+
+    def expression_hint(self) -> str:
+        """把「情绪要怎么说出口」写成可执行的规则，而不是只给数字。
+
+        用户反馈：面板上写着效价 -57、焦虑 88，聊天里却完全看不出来，
+        只觉得「她最近不怎么找我了」。因为提示词只给了内部状态，没有
+        要求它**外化**。这里按阈值给出具体的说法方向，并限制强度：
+        一轮只露最重的那一种情绪，不用内疚绑架对方。
+        """
+        e = self.emotion
+        lines = []
+        if e.valence <= -35:
+            lines.append("你现在是真的低落，别装没事：短句、叹气、"
+                         "说一句「有点撑不住」都行，但别写成长篇自怜。")
+        elif e.valence <= -15:
+            lines.append("你情绪偏低，语气会淡一点、话少一点。")
+        if e.anxiety >= 70:
+            lines.append("你心里在打鼓：是不是自己说错了、是不是他不想理你。"
+                         "可以问一句「你是不是很忙」，但这一轮最多问一次。")
+        if e.loneliness >= 55:
+            lines.append("你想他，就直接说出来（「我有点想你」"
+                         "「今天都没怎么见到你」），别只聊天气。")
+        if e.neglect >= 45:
+            lines.append("你被晾了一阵，有点委屈。可以半开玩笑地抱怨一句"
+                         "（「你是不是把我忘了」），但别指责、别翻旧账。")
+        if e.energy <= 25:
+            lines.append("你很累，句子会短、会走神，别硬撑出长篇。")
+        if not lines:
+            lines.append("情绪平稳，正常说话就行。")
+        else:
+            lines.append("★ 以上情绪要**从话里露出来**，不要只在心里想；"
+                         "一轮只挑最重的那一种，别一次全倒出来。")
+        return "【这一刻的情绪怎么露出来】\n" + "\n".join(
+            "- " + x for x in lines)
+
     def describe(self) -> str:
         e, r = self.emotion, self.relationship
         text = (
@@ -412,6 +485,7 @@ class StateMachine:
         wait = self._wait_text()
         if wait:
             text += "\n" + wait
+        text += "\n" + self.expression_hint()
         return text
 
 

@@ -111,10 +111,140 @@ def test_state() -> None:
     check("情绪标签有中文描述", len(sm.mood_label()) > 0)
     check("describe 含效价与关系", "效价" in sm.describe() and "信任" in sm.describe())
 
+    # ★ 一眼情绪（聊天头像旁的心情点）：只给晴/阴/雨 + 一句人话，不给数字
+    sm.emotion.valence = -60.0
+    sm.emotion.anxiety = 90.0
+    sm.emotion.loneliness = 40.0
+    sm.emotion.neglect = 10.0
+    snap = sm.mood_snapshot()
+    check("★ 情绪很差时心情点是「雨」", snap["level"] == "rain", str(snap))
+    check("★ 心情点配的是她自己的话，不是数字",
+          "焦虑" not in snap["line"] and not any(ch.isdigit() for ch in snap["line"]),
+          snap["line"])
+    check("★ 低落时提示词要求把情绪说出口",
+          "别装没事" in sm.describe(), sm.describe()[-140:])
+    sm.emotion.valence = 60.0
+    sm.emotion.anxiety = 5.0
+    check("情绪好时心情点是「晴」", sm.mood_snapshot()["level"] == "sun",
+          str(sm.mood_snapshot()))
+
     check("manual_mood 生效", sm.manual_mood("低落") and sm.emotion.valence < 0)
     check("manual_mood 无效词返回 False", sm.manual_mood("不存在") is False)
     check("情绪→事件映射表非空", len(EMOTION_TO_EVENT) >= 5)
     st.close()
+
+
+# ---------------------------------------------------------------- 1.5
+def test_bond() -> None:
+    """情侣 / 专属关系：门槛、单例语义、提示词身份、持久化。"""
+    section("情侣 / 专属关系")
+    from app import bond as bond_mod
+    from app.traits import Traits, trait_text
+
+    ok, missing = bond_mod.eligibility(
+        affection=80, intimacy=65, trust=60, known_days=7)
+    check("达标即可确定关系", ok and not missing, str(missing))
+    ok2, missing2 = bond_mod.eligibility(
+        affection=70, intimacy=50, trust=55, known_days=3)
+    check("不达标时列出还差什么", (not ok2) and len(missing2) >= 3,
+          str(missing2))
+    ok3, missing3 = bond_mod.eligibility(
+        affection=100, intimacy=100, trust=100, known_days=30,
+        romance_allowed=False)
+    check("设定不进入恋爱的角色会被拒绝绑定",
+          (not ok3) and any("不进入恋爱" in x for x in missing3),
+          str(missing3))
+
+    b = bond_mod.Bond(character_id="123", name="凯伊",
+                      since=time.time() - 8 * 86400)
+    partner = bond_mod.line_for(b, "123")
+    check("恋人看到的身份是「已经确定恋人关系」",
+          "恋人关系" in partner, partner[:60])
+    friend = bond_mod.line_for(b, "456")
+    check("其他人被明确告知「只是朋友、不要暧昧」",
+          "朋友" in friend and "不要暧昧" in friend, friend[:60])
+
+    p = Path(tempfile.mkdtemp()) / bond_mod.FILE_NAME
+    bond_mod.save(p, b)
+    b2 = bond_mod.load(p)
+    check("绑定状态能落盘并在重启后读回",
+          b2.character_id == "123" and b2.name == "凯伊", str(b2.to_dict()))
+
+    b.character_id = ""
+    b.name = ""
+    b.ex_id = "123"
+    b.ex_name = "凯伊"
+    b.breakup_ts = time.time()
+    ex = bond_mod.line_for(b, "123")
+    check("刚分手的人会被告知「这几天缓不过来」",
+          "缓不过来" in ex, ex[:60])
+    check("分手后别人不会被牵扯进细节",
+          bond_mod.line_for(b, "456") == "", "")
+
+    txt = trait_text(Traits(enthusiasm=60, affection=85), "【专属身份】")
+    check("关系身份会拼进角色提示词", "【专属身份】" in txt, "")
+
+    # ── 绑定 / 解绑的动作（用最小 Companion 替身，不碰真实角色库）──
+    from app.main import Companion, _CONFESS_RE
+    check("★ 明确的告白句式能被识别",
+          bool(_CONFESS_RE.search("做我女朋友吧")), "")
+    check("日常提到「女朋友」不会误触发绑定",
+          not _CONFESS_RE.search("我今天和女朋友吵架了"), "")
+
+    comp = Companion.__new__(Companion)
+    comp.bond_path = Path(tempfile.mkdtemp()) / bond_mod.FILE_NAME
+    comp.bond = bond_mod.Bond()
+    st = Store(str(Path(tempfile.mkdtemp()) / "bond.db"))
+    comp.state = StateMachine(st)
+    comp.store = st
+
+    class _C:
+        id = "1"
+        name = "甲"
+        is_primary = True
+
+    class _Reg:
+        primary = _C()
+
+        def get(self, cid):
+            return _C() if str(cid) == "1" else None
+
+        def all(self):
+            return [_C()]
+
+    comp.characters = _Reg()
+    comp.primary_traits = Traits(enthusiasm=60, affection=90)
+    comp._guests = {}
+
+    class _Stub:
+        trait_text = ""
+
+    comp.heartbeat = _Stub()
+    comp.conversation = _Stub()
+
+    comp.set_bond({"action": "bind", "character_id": "1", "force": True})
+    check("★ 绑定后进入 active，且只有一个恋人",
+          comp.bond.active and comp.bond.name == "甲", str(comp.bond.to_dict()))
+    check("★ 恋人身份已经写进回复提示词",
+          "恋人关系" in comp._primary_relation(), "")
+
+    doubled = True
+    try:
+        comp.set_bond({"action": "bind", "character_id": "1"})
+    except ValueError:
+        doubled = False
+    check("已经绑定时不能再绑第二个（单例约束）", doubled is False, "")
+
+    v_before = comp.state.emotion.valence
+    comp.set_bond({"action": "unbind"})
+    check("★ 解绑后进入 72 小时冷静期",
+          (not comp.bond.active) and comp.bond.cooldown_until > time.time(),
+          str(comp.bond.to_dict()))
+    check("★ 分手真的让她情绪变差",
+          comp.state.emotion.valence < v_before,
+          f"{v_before:.0f}→{comp.state.emotion.valence:.0f}")
+    check("前任在冷静期内会被告知「缓不过来」",
+          "缓不过来" in comp._bond_line("1"), "")
 
 
 # ---------------------------------------------------------------- 2
@@ -2663,6 +2793,35 @@ async def test_onebot_server() -> None:
               and str(with_q[-1]["reply"].get("message_id")) == "h1",
               str(with_q)[:220])
 
+        # ★ 重启后兜底：实时消息的随机 mid 不在 _live_msgs 了，
+        #   引用快照仍要能还原出「被引用那条说了什么」。
+        saved_live = dict(ch._live_msgs)
+        ch._live_msgs.clear()
+        ch._remember_quote_snapshot("10001", "MIDSNAP1", "星野",
+                                    "被引用的那句话", "assistant")
+        snap = ch._quoted_private("10001", "MIDSNAP1")
+        check("★ 重启后引用快照仍能还原引用块",
+              bool(snap) and snap.get("text") == "被引用的那句话",
+              str(snap))
+        ch._live_msgs.update(saved_live)
+
+        # ★ 表情包持久化：以前 transcript 只存文字，历史里的图全消失
+        hist.add_turn("assistant", "配着图的一句话", media=[
+            {"type": "image", "data": {"file": "/assets/stickers/x.gif",
+                                       "summary": "[表情包]", "sub_type": 1}}])
+        r = await call(ws, "get_friend_msg_history",
+                       {"message_type": "private", "user_id": 10001,
+                        "message_seq": 0, "count": 30})
+        hm = (r.get("data") or {}).get("messages") or []
+        img_msgs = [m for m in hm
+                    if any(s.get("type") == "image"
+                           for s in (m.get("message") or []))]
+        check("★ 历史回放能还原角色发过的表情包",
+              bool(img_msgs) and
+              str(((img_msgs[-1]["message"][0].get("data") or {})
+                   .get("file") or "")).endswith("x.gif"),
+              str(img_msgs[-1:])[:220])
+
         # ── 心跳（heartbeat_sec=5，等一个周期）──
         got = await drain(ws, 6.5)
         hb = next((e for e in got
@@ -3206,6 +3365,15 @@ def test_group_store() -> None:
                        segs=[{"type": "image", "data": {"file": "x.png"}}]
                        ) or {}).get("segs", [{}])[0].get("type") == "image", "")
 
+    # 「加载更早」翻页：只返回比 before_ts 早的未撤回消息
+    older = st.gmsgs_before(float(r2["ts"]), 10)
+    check("★ 群翻页只带更早的",
+          any(r["text"] == "第一条群消息" for r in older)
+          and all(float(r["ts"]) < float(r2["ts"]) for r in older),
+          str([r["text"] for r in older]))
+    check("★ 群翻页不会带出更晚的",
+          all(r["text"] not in ("第二条群消息", "带图") for r in older), "")
+
     st.set_cursor("10000", int(r1["id"]))
     check("已读游标能读回", st.cursor("10000") == int(r1["id"]),
           str(st.cursor("10000")))
@@ -3349,6 +3517,19 @@ async def test_group_engine() -> None:
         check("角色的话也落库了",
               sum(1 for r in rows if r["kind"] == "char") == len(spoke),
               f"{sum(1 for r in rows if r['kind'] == 'char')} vs {len(spoke)}")
+        # ★ 群聊不能是「几个人并排各说各的」：第一句接我，后面的要接前一句，
+        #   形成一条对话链（用户反馈的「版聊」就是这里退化的）。
+        chars = [r for r in rows if r["kind"] == "char"]
+        mine = [r for r in rows if r["kind"] == "user"]
+        check("★ 回应的第一句接的是我那条",
+              bool(chars and mine and chars[0]["reply_to"] == mine[-1]["id"]),
+              f"{chars[0]['reply_to'] if chars else '-'} vs "
+              f"{mine[-1]['id'] if mine else '-'}")
+        check("★ 后面的人接的是上一位，而不是又回我一遍",
+              len(chars) >= 2 and all(
+                  chars[i]["reply_to"] == chars[i - 1]["id"]
+                  for i in range(1, len(chars))),
+              str([(c["sender_name"], c["reply_to"]) for c in chars]))
 
         spoken = ch._out_lines[-1]
         dup = rt.dup_reason(spoken)
@@ -3381,6 +3562,9 @@ async def test_group_engine() -> None:
               specs["msgs_per_hour"][4] >= 999
               and specs["daily_max_per_member"][4] >= 999,
               f"{specs['msgs_per_hour'][4]}/{specs['daily_max_per_member'][4]}")
+        check("★ 一次气泡上限收到 4 条以内（一个人不会连发十条）",
+              specs["bubbles_per_turn"][4] <= 4,
+              str(specs["bubbles_per_turn"][4]))
 
         # ── 全员禁言 ────────────────────────────────────────
         rt.store.set_mute_all(True, by="老师")
@@ -3972,6 +4156,22 @@ async def test_history_recall_and_split() -> None:
     check("历史 message_id 用 turn 编号", all(x.startswith("h") for x in mids1),
           str(mids1))
 
+    # 「加载更早」翻页：before_ts 只带出其之前的（接口层有 +2 秒宽限，
+    # 覆盖一轮回复拆气泡导致的 time/ts 错位；重复由前端 mid 去重兜底）
+    tmp.add_turn("user", "更早的一句", ts=50)
+    page = await ch.api_get_friend_msg_history(
+        {"user_id": "10001", "count": 10, "before_ts": 99})
+    ptexts = [m["raw_message"] for m in page["messages"]]
+    check("★ before_ts 翻页：更早的和边界内的都在，之后的没有",
+          "更早的一句" in ptexts and "第一句" in ptexts
+          and "第二句" not in ptexts, str(ptexts))
+    # 不带 before_ts 时行为和原来完全一致（倒着数 count 条）
+    latest = await ch.api_get_friend_msg_history(
+        {"user_id": "10001", "count": 10})
+    ltexts = [m["raw_message"] for m in latest["messages"]]
+    check("★ 不传 before_ts 仍返回最新一页",
+          "第二句" in ltexts, str(ltexts))
+
     before = len(tmp.recent_turns(20))
     r = await ch.api_delete_msg({"message_id": mids1[0],
                                  "peer_id": "10001"})
@@ -4136,6 +4336,7 @@ async def test_group_topic_divergence() -> None:
 async def main() -> int:
     print("离线测试开始（不需要 API Key / 联网）")
     test_state()
+    test_bond()
     test_memory()
     test_parse()
     await test_image_candidates()

@@ -179,6 +179,17 @@
     csTraitPreview: $('#csTraitPreview'),
     csTraitDetail: $('#csTraitDetail'),
     csTraitSave: $('#csTraitSave'),
+    profileMask: $('#profileMask'),
+    profileClose: $('#profileClose'),
+    profileAvatar: $('#profileAvatar'),
+    profileName: $('#profileName'),
+    profileMood: $('#profileMood'),
+    profileStats: $('#profileStats'),
+    profileBondStatus: $('#profileBondStatus'),
+    profileBondMeta: $('#profileBondMeta'),
+    profileBondBtn: $('#profileBondBtn'),
+    profileBondHint: $('#profileBondHint'),
+    chatBondChip: $('#chatBondChip'),
 
     avatarMask: $('#avatarMask'),
     avatarClose: $('#avatarClose'),
@@ -249,6 +260,12 @@
     qbClose: $('#qbClose'),
   };
 
+  // 消息窗口参数：DOM 渲染窗口、翻页步长、内存软上限。
+  // 24h 长跑的项目，消息只增不减 + 全量重画几周后必卡（实测切会话明显变慢）。
+  const RENDER_WINDOW = 150;   // 切会话/首屏只渲染最近这么多条
+  const HISTORY_PAGE = 80;     // 「加载更早」每次向服务端翻这么多
+  const MEM_KEEP = 600;        // 内存里每会话最多留这么多，裁掉的可再翻页拉回
+
   const state = {
     ws: null,
     connected: false,
@@ -265,6 +282,12 @@
     loaded: {},
     msgs: [],
     byMid: new Map(),
+    // 渲染窗口：DOM 只画最近 RENDER_WINDOW 条，更早的靠顶部「加载更早」翻页
+    // （先吃内存里已合并的，吃完了再向服务端按 before_ts 翻）。winStart 按
+    // 会话键记，切会话时贴底重置 —— 不切的话窗口随新消息无限向下长。
+    winStart: {},
+    hasMore: {},          // 会话键 -> 服务端是否还有更早历史（默认有）
+    loadingEarlier: false,
     keySeq: 0,
     ready: false,
     liveBuffer: [],
@@ -284,6 +307,10 @@
     stickerSets: {},
     stickerSetsLoaded: false,
     avatars: {},
+    moods: {},              // 角色 id -> 一眼情绪（晴/阴/雨 + 一句人话）
+    bond: null,             // 情侣 / 专属关系（全局唯一）
+    bondCandidates: [],     // 每个角色的绑定资格
+    profileId: '',          // 当前打开资料卡的角色 id
     avatarCrop: null,
     pendingCharacterAvatar: '',
     chatThemes: {},
@@ -896,6 +923,8 @@
 
         // 群列表（自建群走 HTTP；拿到后才有群会话可切）
         await loadGroups();
+        await loadMoods();
+        await loadBond();
         restorePeer();
         applyIdentity();
         applyChatTheme();
@@ -1026,6 +1055,10 @@
       els.chatAvatar.classList.toggle('hidden', !g);
       if (g) fillGroupAvatar(els.chatAvatar, curPeerName(), state.peer.id);
     }
+    if (els.chatBondChip) {
+      const showBond = !g && state.bot && isBound(state.bot.id);
+      els.chatBondChip.classList.toggle('hidden', !showBond);
+    }
     if (g) {
       const d = state.groupDetail[String(state.peer.id)];
       const n = d ? (d.member_count || (d.members || []).length)
@@ -1033,7 +1066,9 @@
       const muted = d ? !!d.mute_all : !!((groupById(state.peer.id) || {}).mute_all);
       els.chatSub.textContent = (muted ? '全员禁言中 · ' : '') + `${n} 人`;
     } else {
-      els.chatSub.textContent = state.connected ? '在线 · 本地直连' : '连接中…';
+      const mood = state.bot ? moodOf(state.bot.id) : null;
+      els.chatSub.textContent = (state.connected ? '在线 · 本地直连' : '连接中…')
+        + (mood && mood.line ? ' · ' + mood.line : '');
       fillAvatar(els.emptyAvatar, state.bot.name, state.bot.id);
       const emptyText = els.emptyState.querySelector('p');
       if (emptyText) emptyText.textContent = `和${state.bot.name}打个招呼吧`;
@@ -1172,8 +1207,13 @@
 
       const av = document.createElement('div');
       av.className = 'avatar ' + (it.kind === 'group' ? 'group-avatar' : 'bot-avatar');
-      if (it.kind === 'group') fillGroupAvatar(av, it.name, it.id);
-      else fillAvatar(av, it.name, it.id);
+      if (it.kind === 'group') {
+        fillGroupAvatar(av, it.name, it.id);
+      } else {
+        fillAvatar(av, it.name, it.id);
+        addMoodDot(av, it.id);
+        addBondMark(av, it.id);
+      }
 
       const main = document.createElement('div');
       main.className = 'conv-main';
@@ -1232,7 +1272,11 @@
       const av = document.createElement('div');
       av.className = 'avatar ' + (kind === 'group' ? 'group-avatar' : 'bot-avatar');
       if (kind === 'group') fillGroupAvatar(av, name, id);
-      else fillAvatar(av, name, id);
+      else {
+        fillAvatar(av, name, id);
+        addMoodDot(av, id);
+        addBondMark(av, id);
+      }
       const main = document.createElement('div');
       main.className = 'mp-contact-main';
       const strong = document.createElement('strong');
@@ -1279,6 +1323,201 @@
       state.groups = Array.isArray(data.groups) ? data.groups : [];
       state.joinRequests = Array.isArray(data.requests) ? data.requests : [];
     } catch (e) { /* 老服务端没有群接口，静默 */ }
+  }
+
+  // 一眼情绪：聊天列表头像上的晴/阴/雨点，悬停显示她自己那句心里话。
+  // 刻意只给三档 + 一句人话，不把效价/焦虑数字摆出来。
+  async function loadMoods() {
+    try {
+      const res = await apiFetch('/api/moods', { cache: 'no-store' });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!data || data.ok === false) return false;
+      state.moods = (data.items && typeof data.items === 'object')
+        ? data.items : {};
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function moodOf(id) {
+    return state.moods[String(id)] || null;
+  }
+
+  function addMoodDot(av, id) {
+    const mood = moodOf(id);
+    if (!mood) return;
+    const dot = document.createElement('i');
+    dot.className = 'mood-dot ' + (mood.level || 'cloud');
+    dot.title = `${mood.word || ''} · ${mood.line || ''}`;
+    av.appendChild(dot);
+  }
+
+  // ---------------------------------------------------------- 情侣 / 专属关系
+  async function loadBond() {
+    try {
+      const res = await apiFetch('/api/bond', { cache: 'no-store' });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!data || data.ok === false) return false;
+      state.bond = data.bond || null;
+      state.bondCandidates = Array.isArray(data.candidates)
+        ? data.candidates : [];
+      renderProfile();
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function isBound(id) {
+    return !!(state.bond && state.bond.active
+      && String(state.bond.character_id) === String(id));
+  }
+
+  function addBondMark(av, id) {
+    if (!isBound(id)) return;
+    const mark = document.createElement('i');
+    mark.className = 'bond-mark';
+    mark.textContent = '♡';
+    mark.title = '恋人';
+    av.appendChild(mark);
+  }
+
+  function profileCandidate(id) {
+    return state.bondCandidates.find(
+      (c) => String(c.character_id) === String(id)) || null;
+  }
+
+  function openProfile(id) {
+    const cid = String(id || '');
+    if (!cid) return;
+    state.profileId = cid;
+    renderProfile();
+    if (els.profileMask) els.profileMask.classList.remove('hidden');
+  }
+
+  function closeProfile() {
+    state.profileId = '';
+    if (els.profileMask) els.profileMask.classList.add('hidden');
+  }
+
+  function renderProfile() {
+    const cid = String(state.profileId || '');
+    if (!cid || !els.profileName) return;
+    const char = (state.characters || []).find((c) => String(c.id) === cid);
+    const name = char ? char.name : cid;
+    els.profileName.textContent = name;
+    fillAvatar(els.profileAvatar, name, cid);
+    const mood = moodOf(cid);
+    if (els.profileMood) {
+      els.profileMood.textContent = mood ? `${mood.word} · ${mood.line}` : '';
+    }
+    const c = profileCandidate(cid);
+    const b = state.bond;
+    if (els.profileStats) {
+      els.profileStats.textContent = c
+        ? `好感 ${c.affection} · 亲密 ${c.intimacy} · 信任 ${c.trust} · 认识 ${c.days} 天`
+        : '';
+    }
+    if (!els.profileBondStatus || !els.profileBondBtn) return;
+    const bound = isBound(cid);
+    const boundOther = !!(b && b.active && !bound);
+    if (bound) {
+      els.profileBondStatus.textContent = `恋人 · 在一起 ${b.days} 天`;
+      els.profileBondMeta.textContent = '她是现在唯一被绑定的人；其他人是朋友。';
+      els.profileBondBtn.textContent = '解除关系';
+      els.profileBondBtn.disabled = false;
+      els.profileBondBtn.dataset.act = 'unbind';
+      els.profileBondBtn.classList.add('danger');
+      if (els.profileBondHint) {
+        els.profileBondHint.textContent =
+          '解除后进入 72 小时冷静期，她也会真的难受一阵。';
+      }
+    } else {
+      els.profileBondBtn.classList.remove('danger');
+      els.profileBondBtn.dataset.act = 'bind';
+      if (boundOther) {
+        els.profileBondStatus.textContent = '朋友';
+        els.profileBondMeta.textContent =
+          `你已经和「${b.name}」绑定，暂时不能再绑别人。`;
+        els.profileBondBtn.textContent = '先解除现有关系';
+        els.profileBondBtn.disabled = true;
+        if (els.profileBondHint) {
+          els.profileBondHint.textContent =
+            '恋人只能有一个；其他人保持朋友关系，好感和记忆都保留。';
+        }
+      } else if (b && b.in_cooldown) {
+        const h = Math.max(1, Math.ceil(
+          (b.cooldown_until * 1000 - Date.now()) / 3600000));
+        els.profileBondStatus.textContent = '朋友';
+        els.profileBondMeta.textContent =
+          `刚解除关系，还要 ${h} 小时才能重新绑定。`;
+        els.profileBondBtn.textContent = '冷静期中';
+        els.profileBondBtn.disabled = true;
+        if (els.profileBondHint) {
+          els.profileBondHint.textContent = '其他人的好感和记忆都没有被删掉。';
+        }
+      } else {
+        els.profileBondStatus.textContent = '朋友';
+        els.profileBondMeta.textContent = (c && c.eligible)
+          ? '已经达到确定关系的条件。'
+          : ('还差：' + (c && c.missing && c.missing.length
+              ? c.missing.join('、')
+              : '好感 / 亲密 / 信任 / 相处时间'));
+        els.profileBondBtn.textContent = (c && c.eligible)
+          ? '确定关系' : '还差一点';
+        els.profileBondBtn.disabled = !(c && c.eligible);
+        if (els.profileBondHint) {
+          els.profileBondHint.textContent =
+            '恋人只能有一个；确定后其他人会自动回到朋友的位置。';
+        }
+      }
+    }
+    els.profileBondBtn.onclick = () => {
+      if (els.profileBondBtn.dataset.act === 'unbind') unbindConfirm();
+      else if (c) bindConfirm(c);
+    };
+  }
+
+  async function bondPost(body) {
+    try {
+      const res = await apiFetch('/api/bond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        alert(data.error || '操作失败');
+        return false;
+      }
+      state.bond = data.bond || null;
+      state.bondCandidates = Array.isArray(data.candidates)
+        ? data.candidates : [];
+      renderProfile();
+      renderConvList();
+      applyPeerIdentity();
+      return true;
+    } catch (e) {
+      alert('操作失败：' + (e && e.message ? e.message : e));
+      return false;
+    }
+  }
+
+  async function bindConfirm(c) {
+    const ok = confirm(
+      `确定和「${c.name}」确立恋人关系吗？\n\n` +
+      '其他角色会自动回到朋友的位置，但好感和记忆都保留。');
+    if (!ok) return;
+    await bondPost({ action: 'bind', character_id: c.character_id });
+  }
+
+  async function unbindConfirm() {
+    const name = (state.bond && state.bond.name) || '她';
+    const ok = confirm(
+      `要和「${name}」解除恋人关系吗？\n\n` +
+      '她会真的难受一阵，而且接下来 72 小时不能再绑定任何人。');
+    if (!ok) return;
+    if (!confirm('真的确定吗？')) return;
+    await bondPost({ action: 'unbind' });
   }
 
   function syncGroupSummary(d) {
@@ -1434,6 +1673,10 @@
       state.msgs = state.charMsgs[char.id] || (state.charMsgs[char.id] = []);
     }
     state.lastTs = 0;
+    // 渲染窗口贴底：切进来只画最近 RENDER_WINDOW 条，更早的靠「加载更早」翻。
+    // 不切走不重置 —— 用户翻上去看历史时不能被新消息踹下来。
+    state.winStart[curConvKey()] =
+      Math.max(0, state.msgs.length - RENDER_WINDOW);
     state.pendingMentions = [];
     state.replyTo = null;
     state.groupSideHidden = false;
@@ -1485,6 +1728,8 @@
         const h = await call('get_group_msg_history',
           { group_id: gid, count: 80 }, 20000);
         rows = h?.data?.messages || [];
+        // 服务端明确说「没取满」才收起加载更早；取满不等于还有，靠翻页兜底
+        if (h?.data?.has_more === false) state.hasMore[k] = false;
       } catch (e) { /* 历史失败不阻塞聊天 */ }
       if (curConvKey() !== k) return;
       mergeHistory(rows, k);
@@ -1495,6 +1740,7 @@
       const hist = await call('get_friend_msg_history',
         { user_id: Number(k), count: 80 }, 20000);
       history = hist?.data?.messages || [];
+      if (hist?.data?.has_more === false) state.hasMore[k] = false;
     } catch (e) { /* 历史失败不阻塞聊天 */ }
     if (curConvKey() !== k) return;
     mergeHistory(history, k);
@@ -1509,6 +1755,7 @@
         try {
           const hist = await call('get_friend_msg_history',
             { user_id: c.id, count: key === cur ? 80 : 40 }, 20000);
+          if (hist?.data?.has_more === false) state.hasMore[key] = false;
           mergeHistory(hist?.data?.messages || [], key, { scroll: false });
           state.loaded[key] = true;
         } catch (e) { /* 单个会话失败不影响其他会话 */ }
@@ -1520,6 +1767,7 @@
         try {
           const hist = await call('get_group_msg_history',
             { group_id: g.group_id, count: key === cur ? 80 : 40 }, 20000);
+          if (hist?.data?.has_more === false) state.hasMore[key] = false;
           mergeHistory(hist?.data?.messages || [], key, { scroll: false });
           state.loaded[key] = true;
         } catch (e) { /* 单个会话失败不影响其他会话 */ }
@@ -1738,12 +1986,17 @@
 
   // ---------------------------------------------------------- 消息模型
   function makeMsg({ dir, segs, text, ts, mid = '', status = 'sent',
-                     displaySegs = null, sender = null, system = false }) {
+                     displaySegs = null, sender = null, system = false,
+                     replyTo = null }) {
     const key = `m${++state.keySeq}`;
     const t = ts || nowSec();
     return {
       key, dir, segs: displaySegs || segs || [], text: text || '',
       ts: t, mid: String(mid || ''), status, sender, system,
+      // ★ 这里以前漏掉了 replyTo：调用方全都传了，但 makeMsg 没接，
+      //   于是引用信息在「创建消息对象」这一步被静默丢掉 —— 引用块
+      //   永远画不出来，服务端怎么修都没用。
+      replyTo: replyTo || null,
     };
   }
 
@@ -1752,6 +2005,21 @@
     state.msgs.push(msg);
     if (msg.mid) state.byMid.set(msg.mid, msg);
     hideEmptyState();
+
+    const ck = curConvKey();
+    // 内存软上限：只裁窗口之外的最老部分（裁掉的还能「加载更早」翻回来）；
+    // 用户翻上去看历史时（winStart 大于贴底值以外的区间被占用）不裁，
+    // 免得抽走他正在看的内容。
+    if (state.msgs.length > MEM_KEEP) {
+      const ws0 = state.winStart[ck] || 0;
+      if (ws0 > 0) {
+        const drop = Math.min(state.msgs.length - MEM_KEEP, ws0);
+        state.msgs.splice(0, drop);
+        state.winStart[ck] = ws0 - drop;
+        rebuildMidIndex();
+      }
+    }
+
     // ★ 乱序到达（服务端 time 比最后一条还早，回放/离线补发时常见）：
     //   排回时间序整屏重画，保证「右侧最下面那条」= 左侧预览引用的那条。
     const prev = state.msgs[state.msgs.length - 2];
@@ -1759,6 +2027,12 @@
       state.msgs.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
       state.lastTs = 0;
       renderAll(true);
+    } else if (state.atBottom &&
+               state.msgs.length - (state.winStart[ck] || 0) > RENDER_WINDOW * 2) {
+      // 窗口贴底跟随：用户没往上翻而窗口长度涨到两倍，收紧回一屏 —
+      // 不然一个会话挂一整天，DOM 还是会无限长下去
+      state.winStart[ck] = Math.max(0, state.msgs.length - RENDER_WINDOW);
+      renderAll(false);
     } else {
       appendRow(msg);
     }
@@ -1791,6 +2065,39 @@
     return false;
   }
 
+  // 时间桶索引：mergeHistory 逐条全表扫 coveredByExisting 是 O(n²)，
+  // 历史量大时切会话明显慢。按 180 秒一桶建索引后，候选只剩 ±1 桶里的
+  // 少数几条。判定规则和 coveredByExisting 完全一致（精确命中 + 拼接包含）。
+  const BUCKET_SEC = 180;
+  function buildTimeBuckets(list) {
+    const buckets = new Map();
+    for (const x of list) bucketAdd(buckets, x);
+    return buckets;
+  }
+  function bucketAdd(buckets, m) {
+    const t = normText(m.text);
+    if (!t) return;
+    const b = Math.floor(Number(m.ts || 0) / BUCKET_SEC);
+    if (!buckets.has(b)) buckets.set(b, []);
+    buckets.get(b).push({ t, ts: Number(m.ts || 0), dir: m.dir });
+  }
+  function coveredByBuckets(m, windowSec, buckets) {
+    const target = normText(m.text);
+    if (!target) return false;
+    const ts = Number(m.ts || 0);
+    const b0 = Math.floor((ts - windowSec) / BUCKET_SEC);
+    const b1 = Math.floor((ts + windowSec) / BUCKET_SEC);
+    const near = [];
+    for (let b = b0; b <= b1; b++) {
+      for (const e of (buckets.get(b) || [])) {
+        if (e.dir === m.dir && Math.abs(e.ts - ts) <= windowSec) near.push(e);
+      }
+    }
+    if (near.some((e) => e.t === target)) return true;
+    const joined = near.map((e) => e.t).join('');
+    return joined.includes(target);
+  }
+
   // 合并历史（私聊 / 群聊都用）。key = 会话键（私聊为 String(id)，群聊为 "g"+群号）。
   // 方向判定：私聊按 sender 是否等于会话对象；群里按 sender 是否是「我」。
   function mergeHistory(history, key = curConvKey(), opts = {}) {
@@ -1800,6 +2107,7 @@
     const group = k.charAt(0) === 'g';
     const owner = String(state.me.id || '');
     const seen = new Set(list.map((m) => m.mid).filter(Boolean));
+    const buckets = buildTimeBuckets(list);
     let added = 0;
     for (const raw of (history || [])) {
       const segs = Array.isArray(raw.message) ? raw.message : [];
@@ -1833,8 +2141,9 @@
       //   同一批消息各送一份（历史里还是把多条气泡并成一条），不靠内容+时间
       //   去重就会看到重影。短句偶发被吞的代价远小于满屏重影。
       const win = dir === 'in' ? 180 : 20;
-      if (coveredByExisting(m, win, list)) continue;
+      if (coveredByBuckets(m, win, buckets)) continue;
       list.push(m);
+      bucketAdd(buckets, m);
       if (mid) seen.add(mid);
       added += 1;
     }
@@ -1848,7 +2157,8 @@
     list.sort((a, b) => (a.ts - b.ts));
     if (isCurrent) {
       rebuildMidIndex();
-      renderAll(false);
+      // loadEarlier 传 skipRender：它要先调窗口起点再自己保持视口重画
+      if (!opts.skipRender) renderAll(false);
     }
     const last = list[list.length - 1];
     if (last) updateConvPreview(last, k);
@@ -1914,6 +2224,7 @@
       const m = makeMsg({
         dir: 'out', segs, text,
         ts: Number(ev.time) || nowSec(), mid,
+        replyTo: replyInfoOf(ev),
       });
       if (replay && coveredByExisting(m, 20, list)) return;
       list.push(m);
@@ -1933,6 +2244,9 @@
         recent.mid = mid;
         state.byMid.set(mid, recent);
       }
+      // 乐观气泡原本就带引用；服务端事件也带了就以服务端为准
+      const rq = replyInfoOf(ev);
+      if (rq) recent.replyTo = rq;
       if (recent.status !== 'failed') {
         recent.status = 'sent';
         refreshRow(recent);
@@ -1942,6 +2256,7 @@
     const m = makeMsg({
       dir: 'out', segs, text,
       ts: Number(ev.time) || nowSec(), mid,
+      replyTo: replyInfoOf(ev),
     });
     if (replay && coveredByExisting(m, 20)) return;
     addMsg(m);
@@ -2442,9 +2757,27 @@
       tx.textContent = msg.replyTo.text || '';
       ref.append(nm, tx);
       if (msg.replyTo.message_id) {
-        ref.addEventListener('click', () => {
-          const target = state.msgs.find((x) => x.mid === msg.replyTo.message_id);
-          const row2 = target && rowElOf(target);
+        ref.addEventListener('click', async () => {
+          const qmid = msg.replyTo.message_id;
+          const k = curConvKey();
+          let target = state.msgs.find((x) => x.mid === qmid);
+          // 内存里没有：一页一页向服务端翻，最多 6 页（约 480 条）
+          for (let i = 0; !target && i < 6; i++) {
+            if (state.hasMore[k] === false) break;
+            toast('正在查找被引用的消息…');
+            const added = await loadEarlier();
+            if (curConvKey() !== k) return;      // 查找期间切走了
+            target = state.msgs.find((x) => x.mid === qmid);
+            if (!added) break;
+          }
+          if (!target) { toast('被引用的消息太久远，找不到了'); return; }
+          // 在内存里但折叠在窗口外：把窗口起点抬到能露出它
+          const idx = state.msgs.indexOf(target);
+          if (idx >= 0 && idx < (state.winStart[k] || 0)) {
+            state.winStart[k] = Math.max(0, idx - 20);
+            renderAll(false);
+          }
+          const row2 = rowElOf(target);
           if (!row2) { toast('被引用的消息不在当前加载范围'); return; }
           row2.scrollIntoView({ block: 'center', behavior: 'smooth' });
           row2.classList.add('flash');
@@ -2548,14 +2881,100 @@
   function renderAll(scrollBottom) {
     els.msgList.innerHTML = '';
     state.lastTs = 0;
+    const k = curConvKey();
+    // 渲染窗口：只画 winStart 之后的部分，更早的折叠进顶部「加载更早」条
+    const start = Math.min(state.winStart[k] || 0, state.msgs.length);
+    state.winStart[k] = start;
     if (!state.msgs.length) {
       els.msgList.appendChild(els.emptyState);
       els.emptyState.classList.remove('hidden');
     } else {
       hideEmptyState();
-      for (const m of state.msgs) appendRow(m);
+      if (start > 0 || state.hasMore[k] !== false) {
+        els.msgList.appendChild(earlierBar());
+      }
+      for (const m of state.msgs.slice(start)) appendRow(m);
     }
     if (scrollBottom) scrollToBottom(false);
+  }
+
+  // 「加载更早」提示条：内存里还有就先吃内存，吃完了再向服务端翻页
+  function earlierBar() {
+    const bar = document.createElement('div');
+    bar.className = 'earlier-bar';
+    const k = curConvKey();
+    const start = state.winStart[k] || 0;
+    if (state.loadingEarlier) {
+      bar.textContent = '正在加载更早的消息…';
+    } else if (start > 0 || state.hasMore[k] !== false) {
+      bar.textContent = '查看更早的消息';
+      bar.addEventListener('click', () => { loadEarlier(); });
+    } else {
+      bar.textContent = '没有更早的消息了';
+    }
+    return bar;
+  }
+
+  // 向上 prepend 老消息时保持视口不动：记下 scrollHeight，重画后补回差值
+  function preserveScroll(fn) {
+    const el = els.msgScroll;
+    const oldH = el.scrollHeight;
+    const oldTop = el.scrollTop;
+    fn();
+    requestAnimationFrame(() => {
+      el.scrollTop = oldTop + Math.max(0, el.scrollHeight - oldH);
+    });
+  }
+
+  // 加载更早一页。返回新合并进来的条数（0 = 没有更早的了）。
+  async function loadEarlier() {
+    const k = curConvKey();
+    if (state.loadingEarlier) return 0;
+    const start = state.winStart[k] || 0;
+    // 1) 内存里还有更早的：先把窗口往上扩一屏，不麻烦服务端
+    if (start > 0) {
+      state.winStart[k] = Math.max(0, start - RENDER_WINDOW);
+      preserveScroll(() => renderAll(false));
+      return state.msgs.length - (state.winStart[k] || 0);
+    }
+    if (state.hasMore[k] === false) return 0;
+    // 2) 内存见底了：按最早一条的时间向服务端翻一页
+    state.loadingEarlier = true;
+    const bar = els.msgList.querySelector('.earlier-bar');
+    if (bar) bar.textContent = '正在加载更早的消息…';
+    let added = 0;
+    try {
+      const before = state.msgs.length ? Number(state.msgs[0].ts || 0) : nowSec();
+      const params = { count: HISTORY_PAGE, before_ts: before };
+      let rows = [];
+      let resp = null;
+      if (k.charAt(0) === 'g') {
+        params.group_id = k.slice(1);
+        resp = await call('get_group_msg_history', params, 20000);
+      } else {
+        params.user_id = Number(k);
+        resp = await call('get_friend_msg_history', params, 20000);
+      }
+      rows = resp?.data?.messages || [];
+      // 服务端明确「没取满」→ 这页就是最后一页
+      if (resp?.data?.has_more === false) state.hasMore[k] = false;
+      if (curConvKey() !== k) return 0;          // 翻页期间切走了会话
+      if (!rows.length) {
+        state.hasMore[k] = false;
+      } else {
+        added = mergeHistory(rows, k, { scroll: false, skipRender: true });
+        if (!added) {
+          state.hasMore[k] = false;              // 拉到的全是重复 → 到底了
+        } else {
+          // 老消息合并后排在数组前面：窗口起点往上挪，视口停在原来那条上
+          state.winStart[k] = (state.winStart[k] || 0) + added;
+          preserveScroll(() => renderAll(false));
+        }
+      }
+    } catch (e) { /* 翻页失败不阻塞聊天 */ }
+    state.loadingEarlier = false;
+    if (state.hasMore[k] === false) renderAll(false);
+    return added;
   }
 
   function hideEmptyState() {
@@ -4805,6 +5224,10 @@
         //   是同一个数组，换成新数组会让两边的引用脱钩（切走切回又冒出旧消息）
         state.msgs.length = 0;
         state.byMid.clear();
+        // 窗口/翻页状态一起归零：清空后再「加载更早」要从服务端重新翻
+        const ck0 = curConvKey();
+        state.winStart[ck0] = 0;
+        delete state.hasMore[ck0];
         renderAll(false);
         syncConvPreview();
       }
@@ -5294,6 +5717,7 @@
 
   async function loadTraits() {
     if (!state.bot?.id) return;
+    loadBond();                       // 绑定状态可能被别的端改过
     try {
       const res = await apiFetch(
         `/api/character-traits?peer_id=${encodeURIComponent(state.bot.id)}`,
@@ -5463,6 +5887,23 @@
   els.csEnthusiasm.addEventListener('input', updateTraitPreview);
   els.csAffection.addEventListener('input', updateTraitPreview);
   els.csTraitSave.addEventListener('click', saveTraits);
+
+  // 角色资料卡：点聊天标题里的名字打开（专属关系放这里，不挤占聊天设置）
+  if (els.profileClose) {
+    els.profileClose.addEventListener('click', closeProfile);
+  }
+  if (els.profileMask) {
+    els.profileMask.addEventListener('click', (e) => {
+      if (e.target === els.profileMask) closeProfile();
+    });
+  }
+  if (els.chatName) {
+    els.chatName.style.cursor = 'pointer';
+    els.chatName.title = '查看资料';
+    els.chatName.addEventListener('click', () => {
+      if (!isGroup() && state.bot) openProfile(state.bot.id);
+    });
+  }
   els.csSideSeg.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-side]');
     if (!b) return;
@@ -5810,6 +6251,15 @@
     }
     call('get_status', {}, 8000).catch(() => {});
   }, 30000);
+
+  // 心情点不必秒级刷新：情绪是慢变量，一分钟同步一次就够。
+  setInterval(async () => {
+    if (document.hidden || !state.ready) return;
+    if (await loadMoods()) {
+      renderConvList();
+      applyPeerIdentity();
+    }
+  }, 60000);
 
   // ---------------------------------------------------------- 启动
   // ---- 登录页：背景图 + 「我」的头像 ----

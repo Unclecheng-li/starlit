@@ -145,9 +145,27 @@ def save_traits(peer_id: str,
     t = Traits(enthusiasm=_clamp_int(enthusiasm),
                affection=_clamp_int(affection))
     data = _load_all()
-    data[str(peer_id)] = {"enthusiasm": t.enthusiasm, "affection": t.affection}
+    entry = data.get(str(peer_id))
+    entry = entry if isinstance(entry, dict) else {}
+    # ★ 保留 romance_allowed 之类的附加字段：面板只改两个滑杆，
+    #   不能顺手把角色「不进入恋爱」的设定抹掉。
+    entry["enthusiasm"] = t.enthusiasm
+    entry["affection"] = t.affection
+    data[str(peer_id)] = entry
     _save_all(data)
     return t
+
+
+def romance_allowed(peer_id: str) -> bool:
+    """角色设定是否允许进入恋人关系（默认允许）。
+
+    在 data/character_traits.json 里给某个角色加
+    `"romance_allowed": false` 即可；绑定接口会据此拒绝。
+    """
+    entry = _load_all().get(str(peer_id))
+    if isinstance(entry, dict) and entry.get("romance_allowed") is False:
+        return False
+    return True
 
 
 def ensure_defaults(chars) -> None:
@@ -315,7 +333,7 @@ def derive_conversation(base: ConversationConfig, t: Traits,
 
 # ---------------------------------------------------------------- 提示词
 
-def trait_text(t: Traits) -> str:
+def trait_text(t: Traits, extra: str = "") -> str:
     e, a = t.enthusiasm, t.affection
     if e >= 80:
         speed = "你回得很快，也愿意主动找话题；想到什么就发，不端着。"
@@ -344,7 +362,7 @@ def trait_text(t: Traits) -> str:
     else:
         care = "你对对方比较客气疏离：不主动关心私生活，也不吃醋、不黏人。"
 
-    return (
+    base = (
         f"热情 {e}/100，好感 {a}/100。\n"
         f"- 热情：{speed}\n"
         f"- 好感：{care}\n"
@@ -361,6 +379,9 @@ def trait_text(t: Traits) -> str:
         "- 角色设定为未成年的：好感高只表现为亲近、依赖、撒娇，"
         "不写性暗示，不推进恋爱关系。"
     )
+    if extra:
+        base += "\n" + extra
+    return base
 
 
 def trait_preview(t: Traits) -> str:
