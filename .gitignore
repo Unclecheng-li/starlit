@@ -14,6 +14,9 @@
 专属AI伴侣/companion/data/groups/
 专属AI伴侣/companion/data/groups.json
 
+# 身份修复前的角色库快照（含聊天记录与记忆，绝不外传）
+专属AI伴侣/companion/data/_backup_identity_fix/
+
 # 角色头像（第三方美术素材）
 专属AI伴侣/companion/data/avatars/
 专属AI伴侣/companion/data/character_avatars/
