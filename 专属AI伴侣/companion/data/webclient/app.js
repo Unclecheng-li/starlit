@@ -546,6 +546,13 @@
       if (!res.ok) return;
       const data = await res.json();
       state.avatars = (data && typeof data.items === 'object') ? data.items : {};
+      fillAvatar(els.brandAvatar, state.me.name, state.me.id, '我');
+      fillAvatar(els.railAvatar, state.me.name, state.me.id, '我');
+      fillAvatar(els.mobileAvatar, state.me.name, state.me.id, '我');
+      fillAvatar(els.csPreviewOutAvatar, state.me.name, state.me.id, '我');
+      document.querySelectorAll('#msgList .msg-row.out .me-avatar').forEach((el) => {
+        fillAvatar(el, state.me.name, state.me.id, '我');
+      });
       refreshBotAvatars();
       renderConvList();
       renderContactList();
@@ -567,15 +574,16 @@
     icon.src = qqAvatarUrl(state.bot.id, 100);
   }
 
-  const toastTimer = { id: 0 };
+  const toastTimer = { id: 0, hideId: 0 };
   function toast(text) {
+    clearTimeout(toastTimer.id);
+    clearTimeout(toastTimer.hideId);
     els.toast.textContent = text;
     els.toast.classList.remove('hidden');
     requestAnimationFrame(() => els.toast.classList.add('show'));
-    clearTimeout(toastTimer.id);
     toastTimer.id = setTimeout(() => {
       els.toast.classList.remove('show');
-      setTimeout(() => els.toast.classList.add('hidden'), 220);
+      toastTimer.hideId = setTimeout(() => els.toast.classList.add('hidden'), 220);
     }, 2200);
   }
 
@@ -608,7 +616,7 @@
       b.classList.toggle('active', b.dataset.theme === theme);
     });
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = theme === 'dark' ? '#0b0e14' : '#0099ff';
+    if (meta) meta.content = theme === 'dark' ? '#0c0e17' : '#e9e9f2';
   }
   els.railTheme.addEventListener('click', () => {
     setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
@@ -632,12 +640,12 @@
   ];
   const DEFAULT_IN = {
     style: 'classic', custom: false,
-    bg1: '#ffffff', bg2: '#f7fbff', fg: '#17202c',
+    bg1: '#ffffff', bg2: '#f8f7fd', fg: '#292735',
     tag: '', deco: 'none',
   };
   const DEFAULT_OUT = {
     style: 'classic', custom: false,
-    bg1: '#1aa8ff', bg2: '#0b82ff', fg: '#ffffff',
+    bg1: '#877aef', bg2: '#6d5fd7', fg: '#ffffff',
     tag: '', deco: 'none',
   };
   const TAG_PRESETS = ['', 'MUM', '♡', '(๑•̀ㅂ•́)و✧', '喵', '星野', '大叔'];
@@ -926,6 +934,10 @@
         await loadMoods();
         await loadBond();
         restorePeer();
+        if (isGroup()) {
+          loadGroupDetail(state.peer.id);
+          loadGroupFiles(state.peer.id);
+        }
         applyIdentity();
         applyChatTheme();
         renderConvList();
@@ -1051,6 +1063,17 @@
     //   必须是那个人的信息）
     applyChatSettingsIdentity();
     els.chatName.textContent = curPeerName();
+    els.chatName.tabIndex = g ? -1 : 0;
+    els.chatName.title = g ? curPeerName() : '查看角色资料';
+    if (g) {
+      els.chatName.removeAttribute('role');
+      els.chatName.removeAttribute('aria-label');
+      els.chatName.removeAttribute('aria-haspopup');
+    } else {
+      els.chatName.setAttribute('role', 'button');
+      els.chatName.setAttribute('aria-label', `查看${curPeerName()}的资料`);
+      els.chatName.setAttribute('aria-haspopup', 'dialog');
+    }
     if (els.chatAvatar) {
       els.chatAvatar.classList.toggle('hidden', !g);
       if (g) fillGroupAvatar(els.chatAvatar, curPeerName(), state.peer.id);
@@ -1679,7 +1702,8 @@
       Math.max(0, state.msgs.length - RENDER_WINDOW);
     state.pendingMentions = [];
     state.replyTo = null;
-    state.groupSideHidden = false;
+    state.groupSideHidden = window.matchMedia(
+      '(min-width: 881px) and (max-width: 1050px)').matches;
     rebuildMidIndex();
     try {
       localStorage.setItem('vol.peer',
@@ -2815,15 +2839,53 @@
     row.append(check, av, body);
     // 多选模式下整行点击切换选中；捕获阶段拦掉图片预览/链接等子元素行为
     row.addEventListener('click', (e) => {
+      if (Date.now() < state.suppressClickUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       if (!state.selectMode) return;
       e.preventDefault();
       e.stopPropagation();
-      if (Date.now() < state.suppressClickUntil) return;
       toggleSelect(msg);
     }, true);
+
+    // 触屏长按与桌面右键共用同一个消息菜单，不拦截正常滚动。
+    let pressTimer = 0;
+    let pressPoint = null;
+    let longPressed = false;
+    const cancelPress = () => {
+      clearTimeout(pressTimer);
+      pressTimer = 0;
+      pressPoint = null;
+    };
+    row.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || e.button !== 0 || state.selectMode) return;
+      if (e.target.closest('a,button,input,textarea')) return;
+      cancelPress();
+      longPressed = false;
+      pressPoint = { x: e.clientX, y: e.clientY };
+      pressTimer = setTimeout(() => {
+        if (!pressPoint || state.selectMode) return;
+        const point = { ...pressPoint };
+        longPressed = true;
+        state.suppressClickUntil = Date.now() + 650;
+        cancelPress();
+        openCtx(point.x, point.y, msg);
+      }, 520);
+    });
+    row.addEventListener('pointermove', (e) => {
+      if (!pressPoint) return;
+      if (Math.hypot(e.clientX - pressPoint.x, e.clientY - pressPoint.y) > 12) {
+        cancelPress();
+      }
+    }, { passive: true });
+    row.addEventListener('pointerup', cancelPress);
+    row.addEventListener('pointercancel', cancelPress);
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       if (state.selectMode) return;
+      if (longPressed) { longPressed = false; return; }
       openCtx(e.clientX, e.clientY, msg);
     });
     return row;
@@ -2972,8 +3034,10 @@
         }
       }
     } catch (e) { /* 翻页失败不阻塞聊天 */ }
-    state.loadingEarlier = false;
-    if (state.hasMore[k] === false) renderAll(false);
+    finally {
+      state.loadingEarlier = false;
+      if (curConvKey() === k && state.hasMore[k] === false) renderAll(false);
+    }
     return added;
   }
 
@@ -2991,12 +3055,17 @@
   function syncConvPreview(key = curConvKey()) {
     const k = String(key);
     const list = k === curConvKey() ? state.msgs : listFor(k);
-    if (!list.length) return;
+    const meta = convMetaFor(k);
+    if (!list.length) {
+      meta.preview = '';
+      meta.ts = 0;
+      renderConvList();
+      return;
+    }
     let last = list[0];
     for (const m of list) {
       if (Number(m.ts || 0) >= Number(last.ts || 0)) last = m;
     }
-    const meta = convMetaFor(k);
     // 群消息预览带上说话人（像 QQ：「小星：今晚吃啥」）
     const who = k.charAt(0) === 'g' && last.dir !== 'out' && last.sender
       ? last.sender.name + '：' : (last.dir === 'out' ? '我：' : '');
@@ -3047,8 +3116,9 @@
 
   function updateBadges() {
     const n = state.unread;
-    els.toBottomBadge.textContent = n > 99 ? '99+' : String(n);
-    els.toBottomBadge.classList.toggle('hidden', n === 0);
+    const current = convMetaFor(curConvKey()).unread || 0;
+    els.toBottomBadge.textContent = current > 99 ? '99+' : String(current);
+    els.toBottomBadge.classList.toggle('hidden', current === 0);
     if (els.navBadge) {
       els.navBadge.textContent = n > 99 ? '99+' : String(n);
       els.navBadge.classList.toggle('hidden', n === 0);
@@ -4896,7 +4966,17 @@
     renderGroupSide();
   }
   if (els.gsClose) els.gsClose.addEventListener('click', closeGroupSide);
-  if (els.chatAvatar) els.chatAvatar.addEventListener('click', toggleGroupSide);
+  if (els.chatAvatar) {
+    els.chatAvatar.tabIndex = 0;
+    els.chatAvatar.setAttribute('role', 'button');
+    els.chatAvatar.setAttribute('aria-label', '查看群资料');
+    els.chatAvatar.addEventListener('click', toggleGroupSide);
+    els.chatAvatar.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      toggleGroupSide();
+    });
+  }
   if (els.gsAnnounceEdit) els.gsAnnounceEdit.addEventListener('click', openAnnounce);
   if (els.gsInvite) els.gsInvite.addEventListener('click', openInvite);
   if (els.gsMemberSearch) els.gsMemberSearch.addEventListener('input', renderGroupMembers);
@@ -4949,7 +5029,7 @@
     }
     for (const it of specs) {
       if (it.kind === 'bool') {
-        const row = document.createElement('label');
+        const row = document.createElement('div');
         row.className = 'setting-row compact';
         const box = document.createElement('div');
         box.innerHTML = `<strong>${it.label}</strong>`;
@@ -5903,6 +5983,11 @@
     els.chatName.addEventListener('click', () => {
       if (!isGroup() && state.bot) openProfile(state.bot.id);
     });
+    els.chatName.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      els.chatName.click();
+    });
   }
   els.csSideSeg.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-side]');
@@ -6178,9 +6263,91 @@
     }
   });
 
+  function setupDialogA11y() {
+    const masks = [...document.querySelectorAll('.modal-mask')];
+    const focusableSelector = [
+      'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+      'textarea:not([disabled])', 'select:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',');
+    const visibleDialog = () => masks
+      .filter((mask) => !mask.classList.contains('hidden'))
+      .map((mask) => mask.querySelector('.modal'))
+      .filter(Boolean).pop() || null;
+    const focusableItems = (dialog) => [...dialog.querySelectorAll(focusableSelector)]
+      .filter((node) => node.getClientRects().length && node.getAttribute('aria-hidden') !== 'true');
+    let returnFocus = null;
+
+    masks.forEach((mask, index) => {
+      const dialog = mask.querySelector('.modal');
+      if (!dialog) return;
+      const title = dialog.querySelector('h2');
+      if (title && !title.id) title.id = `dialog-title-${index + 1}`;
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.tabIndex = -1;
+      if (title) dialog.setAttribute('aria-labelledby', title.id);
+      else dialog.setAttribute('aria-label', '对话框');
+
+      new MutationObserver(() => {
+        if (!mask.classList.contains('hidden')) {
+          const active = document.activeElement;
+          if (active && active !== document.body && !active.closest('.modal')) {
+            returnFocus = active;
+          }
+          requestAnimationFrame(() => {
+            if (mask.classList.contains('hidden') || dialog.contains(document.activeElement)) return;
+            const preferred = dialog.querySelector(
+              '.modal-body [autofocus], .modal-body input:not([disabled]), ' +
+              '.modal-body textarea:not([disabled]), .modal-body button:not([disabled])'
+            );
+            (preferred || focusableItems(dialog)[0] || dialog).focus({ preventScroll: true });
+          });
+        } else if (!visibleDialog() && returnFocus) {
+          const target = returnFocus;
+          requestAnimationFrame(() => {
+            if (!visibleDialog() && target.isConnected) target.focus({ preventScroll: true });
+          });
+        }
+      }).observe(mask, { attributes: true, attributeFilter: ['class'] });
+    });
+
+    document.addEventListener('focusin', (e) => {
+      if (e.target !== document.body && !visibleDialog() &&
+          !e.target.closest('.modal-mask, .action-sheet')) {
+        returnFocus = e.target;
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab') return;
+      const dialog = visibleDialog();
+      if (!dialog) return;
+      const items = focusableItems(dialog);
+      if (!items.length) { e.preventDefault(); dialog.focus(); return; }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !dialog.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !dialog.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
+
+    document.querySelectorAll('.modal-head .icon-btn, .panel-close, #searchClose')
+      .forEach((button) => {
+        if (!button.hasAttribute('aria-label')) button.setAttribute('aria-label', '关闭');
+      });
+  }
+
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (!els.lightbox.classList.contains('hidden')) { closeLightbox(); return; }
+      if (!els.avatarMask.classList.contains('hidden')) { closeAvatarCrop(); return; }
+      if (els.profileMask && !els.profileMask.classList.contains('hidden')) { closeProfile(); return; }
+      if (!els.characterMask.classList.contains('hidden')) { closeCharacterModal(); return; }
       if (!els.forwardMask.classList.contains('hidden')) { closeForwardModal(); return; }
       if (!els.createGroupMask.classList.contains('hidden')) { closeCreateGroup(); return; }
       if (!els.inviteMask.classList.contains('hidden')) {
@@ -6221,7 +6388,8 @@
       if (state.selectMode) { exitSelectMode(); return; }
       if (!els.chatSearch.classList.contains('hidden')) toggleChatSearch(false);
     }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' &&
+        !document.querySelector('.modal-mask:not(.hidden)')) {
       e.preventDefault();
       toggleChatSearch(true);
     }
@@ -6320,6 +6488,7 @@
 
   function init() {
     const qTheme = new URLSearchParams(location.search).get('theme');
+    setupDialogA11y();
     setTheme(qTheme || localStorage.getItem(LS_THEME) || 'light');
     applyChatTheme();
     if (state.token) localStorage.setItem(LS_TOKEN, state.token);

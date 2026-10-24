@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#0099ff">
+  <meta name="theme-color" content="#e9e9f2">
   <link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb3d9'/%3E%3Cstop offset='.55' stop-color='%23a48bff'/%3E%3Cstop offset='1' stop-color='%236fa8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M13 21a9 9 0 0 1 9-9h20a9 9 0 0 1 9 9v12a9 9 0 0 1-9 9H31l-9 8v-8a9 9 0 0 1-9-9Z' fill='%23fff' opacity='.95'/%3E%3Cpath d='m32 18 2.7 6.1 6.6.7-4.9 4.4 1.4 6.4L32 32.3l-5.8 3.3 1.4-6.4-4.9-4.4 6.6-.7Z' fill='%237a5cff'/%3E%3Ccircle cx='49' cy='15' r='2.4' fill='%23fff'/%3E%3C/svg%3E">
   <title>starlit · vol</title>
-  <link rel="stylesheet" href="./app.css?v=20261021f">
+  <link rel="stylesheet" href="./app.css?v=20261023b">
 </head>
 <body>
 
@@ -179,7 +179,7 @@
     <div class="brand-avatar" id="brandAvatar"><span>我</span><i class="brand-dot presence-dot"></i></div>
     <h1>starlit</h1>
     <p class="brand-sub">vol · 只属于你的 AI 伙伴</p>
-    <div class="connect-state" id="connectState">
+    <div class="connect-state" id="connectState" role="status" aria-live="polite">
       <span class="pulse"></span><span id="connectStateText">正在连接…</span>
     </div>
     <button class="primary" id="connectBtn">重新连接</button>
@@ -191,10 +191,10 @@
       </div>
     </div>
     <p class="connect-tip" id="connectTip">请通过 vol 启动后的地址打开本页面（http://127.0.0.1:8080/）</p>
-    <button class="connect-bg-btn" id="connectBgPick" type="button" title="换一张登录背景">
-      <svg><use href="#i-image"/></svg><span>更换背景</span>
-    </button>
   </div>
+  <button class="connect-bg-btn" id="connectBgPick" type="button" title="换一张登录背景">
+    <svg><use href="#i-image"/></svg><span>更换背景</span>
+  </button>
   <input type="file" id="connectBgInput" accept="image/*" hidden>
 </section>
 
@@ -520,7 +520,7 @@
     </div>
   </section>
 
-  <div class="action-sheet hidden" id="mobileActions">
+  <div class="action-sheet hidden" id="mobileActions" role="dialog" aria-modal="true" aria-label="更多操作">
     <div class="sheet">
       <button data-act="createGroup"><svg><use href="#i-group"/></svg>创建群聊</button>
       <button data-act="chatStyle"><svg><use href="#i-palette"/></svg>聊天设置</button>
@@ -728,7 +728,7 @@
         <div class="trait-actions">
           <button class="ghost mini-btn" id="csTraitSave">保存关系参数</button>
         </div>
-        <p class="cs-hint">热情决定主动频率与回复速度（已 ×3 倍率）；好感决定黏人程度、接话窗口、追问深度，**并叠加到主动次数上**。</p>
+        <p class="cs-hint">热情决定主动频率与回复速度（已 ×3 倍率）；好感决定黏人程度、接话窗口、追问深度，<strong>并叠加到主动次数上</strong>。</p>
       </div>
 
       <div class="seg cs-side" id="csSideSeg">
@@ -871,7 +871,7 @@
     </header>
     <div class="modal-body">
       <div class="setting-row">
-        <div><strong>主题</strong><span>经典 QQ 蓝白 / 夜间玻璃</span></div>
+        <div><strong>主题</strong><span>瓷白雾紫 / 午夜蓝</span></div>
         <div class="seg" id="themeSeg">
           <button data-theme="light">浅色</button>
           <button data-theme="dark">深色</button>
@@ -945,7 +945,7 @@
 </div>
 <input type="file" id="characterAvatarInput" accept="image/*" hidden>
 
-<div class="toast hidden" id="toast"></div>
-<script src="./app.js?v=20261021f"></script>
+<div class="toast hidden" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<script src="./app.js?v=20261023b"></script>
 </body>
 </html>
